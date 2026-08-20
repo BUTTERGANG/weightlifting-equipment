@@ -22,7 +22,7 @@ import argparse
 from pathlib import Path
 from datetime import datetime
 from functools import wraps
-from flask import Flask, g, request, jsonify, render_template_string, Response
+from flask import Flask, g, request, jsonify, render_template_string, session, redirect, url_for
 
 # ── Config ────────────────────────────────────────────────────────────────
 
@@ -31,6 +31,9 @@ DATABASE_URL = os.environ.get('DATABASE_URL', '')
 AUTH_FILE = Path.home() / '.equipment_dashboard_auth'
 
 app = Flask(__name__)
+app.secret_key = os.environ.get('DASHBOARD_SECRET') or hashlib.sha256(
+    (AUTH_FILE.read_text() if AUTH_FILE.exists() else 'liftracker').encode()
+).hexdigest()
 
 
 # ── Database abstraction ──────────────────────────────────────────────────
@@ -120,17 +123,12 @@ def check_auth(username, password):
     return False
 
 
-def authenticate():
-    return Response('Authentication required', 401,
-                    {'WWW-Authenticate': 'Basic realm="LiftTracker Dashboard"'})
-
-
-def requires_auth(f):
+def require_login(f):
+    """Redirect unauthenticated users to the login page."""
     @wraps(f)
     def decorated(*args, **kwargs):
-        auth = request.authorization
-        if not auth or not check_auth(auth.username, auth.password):
-            return authenticate()
+        if 'user' not in session:
+            return redirect(url_for('login_page'))
         return f(*args, **kwargs)
     return decorated
 
@@ -157,6 +155,106 @@ def setup_auth():
     save_user(username, password)
     print(f"User '{username}' created")
     print(f"Auth file: {AUTH_FILE}")
+
+
+# ── Login Page & Routes ─────────────────────────────────────────────────────
+
+LOGIN_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiftTracker — Login</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+       min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.login-card { background: #fff; border-radius: 16px; padding: 40px; width: 100%;
+              max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.login-card h1 { font-size: 24px; font-weight: 700; text-align: center; margin-bottom: 4px; }
+.login-card h1 span { color: #4fc3f7; }
+.login-card .subtitle { text-align: center; color: #888; font-size: 14px; margin-bottom: 28px; }
+.login-card .error { background: #ffebee; color: #c62828; padding: 10px 14px; border-radius: 8px;
+                     font-size: 13px; margin-bottom: 16px; display: none; }
+.login-card .field { margin-bottom: 16px; }
+.login-card label { display: block; font-size: 13px; font-weight: 600; color: #555;
+                    margin-bottom: 4px; }
+.login-card input { width: 100%; padding: 12px 14px; border: 2px solid #e0e0e0;
+                    border-radius: 8px; font-size: 15px; transition: border-color .2s; }
+.login-card input:focus { outline: none; border-color: #4fc3f7; }
+.login-card button { width: 100%; padding: 12px; background: #1a1a2e; color: #fff;
+                     border: none; border-radius: 8px; font-size: 15px; font-weight: 600;
+                     cursor: pointer; transition: background .2s; }
+.login-card button:hover { background: #0f3460; }
+.login-card .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #aaa; }
+</style>
+</head>
+<body>
+<div class="login-card">
+  <h1>🏋️ <span>LiftTracker</span></h1>
+  <div class="subtitle">Equipment Price Dashboard</div>
+  <div class="error" id="errorMsg"></div>
+  <form id="loginForm" onsubmit="return handleLogin(event)">
+    <div class="field">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" required>
+    </div>
+    <button type="submit">Sign In</button>
+  </form>
+  <div class="footer">Track your gear. Find the deal.</div>
+</div>
+<script>
+async function handleLogin(e) {
+  e.preventDefault();
+  const err = document.getElementById('errorMsg');
+  const username = document.getElementById('username').value.trim();
+  const password = document.getElementById('password').value;
+  if (!username || !password) { err.textContent = 'Please enter username and password'; err.style.display='block'; return false; }
+  try {
+    const r = await fetch('/login', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'username='+encodeURIComponent(username)+'&password='+encodeURIComponent(password)
+    });
+    if (r.ok) { window.location.href = '/'; return false; }
+    const data = await r.json();
+    err.textContent = data.error || 'Invalid credentials';
+    err.style.display = 'block';
+  } catch(e) {
+    err.textContent = 'Connection error. Try again.';
+    err.style.display = 'block';
+  }
+  return false;
+}
+</script>
+</body>
+</html>"""
+
+
+@app.route('/login', methods=['GET', 'POST'])
+def login_page():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        password = request.form.get('password', '').strip()
+        if check_auth(username, password):
+            session['user'] = username
+            return jsonify({'ok': True})
+        return jsonify({'error': 'Invalid username or password'}), 401
+    # GET — show login page
+    if 'user' in session:
+        return redirect(url_for('index'))
+    return render_template_string(LOGIN_HTML)
+
+
+@app.route('/logout')
+def logout():
+    session.pop('user', None)
+    return redirect(url_for('login_page'))
 
 
 # ── HTML Template ─────────────────────────────────────────────────────────
@@ -240,10 +338,14 @@ tr:hover { background: #fafbff; }
 <body>
 <header>
   <div><h1>🏋️ <span>LiftTracker</span> — Equipment Price Dashboard</h1></div>
-  <div class="stats">
-    <strong id="totalProducts">—</strong> products ·
-    <strong id="totalStores">—</strong> stores ·
-    last scrape: <strong id="lastScrape">—</strong>
+  <div style="display:flex;align-items:center;gap:16px;flex-wrap:wrap">
+    <div class="stats">
+      <strong id="totalProducts">—</strong> products ·
+      <strong id="totalStores">—</strong> stores ·
+      last scrape: <strong id="lastScrape">—</strong>
+    </div>
+    <span id="userInfo" style="font-size:13px;color:#aaa;white-space:nowrap"></span>
+    <a href="/logout" style="font-size:13px;color:#4fc3f7;text-decoration:none;white-space:nowrap">Sign out</a>
   </div>
 </header>
 <div class="container">
@@ -316,8 +418,9 @@ const STORE_COLORS = {
 };
 function storeColor(s) { return STORE_COLORS[s]||'#'+Math.floor(Math.random()*0xFFFFFF).toString(16).padStart(6,'0'); }
 async function loadData() {
-  const [pr, mr] = await Promise.all([fetch('/api/products'), fetch('/api/meta')]);
-  allProducts = await pr.json(); const meta = await mr.json();
+  const [pr, mr, ur] = await Promise.all([fetch('/api/products'), fetch('/api/meta'), fetch('/api/me')]);
+  allProducts = await pr.json(); const meta = await mr.json(); const u = await ur.json();
+  document.getElementById('userInfo').textContent = u.user ? '👤 '+u.user : '';
   stores = meta.stores; categories = meta.categories;
   document.getElementById('totalProducts').textContent = meta.total_products;
   document.getElementById('totalStores').textContent = meta.total_stores;
@@ -446,13 +549,13 @@ loadData();
 # ── API Routes ────────────────────────────────────────────────────────────
 
 @app.route('/')
-@requires_auth
+@require_login
 def index():
     return render_template_string(HTML)
 
 
 @app.route('/api/products')
-@requires_auth
+@require_login
 def api_products():
     """All products with latest price, historical stats, and deal detection."""
     db_type = get_db_type()
@@ -522,7 +625,7 @@ def api_products():
 
 
 @app.route('/api/product/<int:pid>')
-@requires_auth
+@require_login
 def api_product(pid):
     """Single product detail with full price history."""
     db_type = get_db_type()
@@ -616,7 +719,7 @@ def api_product(pid):
 
 
 @app.route('/api/meta')
-@requires_auth
+@require_login
 def api_meta():
     stores = fetch_dict("SELECT DISTINCT site FROM products ORDER BY site")
     cats = fetch_dict("SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category != '' ORDER BY category")
@@ -633,6 +736,12 @@ def api_meta():
         'category_count': cat_count['c'] if cat_count else 0,
         'last_scrape': last['last'][:19].replace('T', ' ') if last and last['last'] else None,
     })
+
+
+@app.route('/api/me')
+@require_login
+def api_me():
+    return jsonify({'user': session.get('user', '')})
 
 
 # ── Main ──────────────────────────────────────────────────────────────────
