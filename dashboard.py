@@ -656,11 +656,16 @@ def main():
         print("Run a scrape first:  python scraper/run_scrape.py")
         sys.exit(1)
 
+    # Auto-create default admin/admin on first run (Replit/ephemeral friendly)
+    if not AUTH_FILE.exists():
+        save_user('admin', 'admin')
+        print("   Created default credentials: admin / admin")
+
     db_source = 'Neon PostgreSQL' if DATABASE_URL else f'SQLite ({DB_PATH})'
     print(f"🏋️  LiftTracker Dashboard")
     print(f"   Database: {db_source}")
     print(f"   URL:      http://{args.host}:{args.port}")
-    print(f"   Auth:     {'enabled' if AUTH_FILE.exists() else 'none set (run --setup-auth)'}")
+    print(f"   Auth:     enabled (credentials in {AUTH_FILE})")
     print(f"   Press Ctrl+C to stop")
 
     if DATABASE_URL:
