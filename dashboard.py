@@ -16,6 +16,8 @@ import os
 import re
 import sys
 import json
+import time
+import secrets
 import sqlite3
 import hashlib
 import argparse
@@ -23,12 +25,18 @@ from pathlib import Path
 from datetime import datetime
 from functools import wraps
 from flask import Flask, g, request, jsonify, render_template_string, session, redirect, url_for
+from werkzeug.security import generate_password_hash, check_password_hash
 
 # ── Config ────────────────────────────────────────────────────────────────
 
 DB_PATH = Path.home() / 'equipment_data' / 'equipment.db'
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
 AUTH_FILE = Path.home() / '.equipment_dashboard_auth'
+RESET_FILE = Path.home() / '.equipment_dashboard_resets'
+RESET_TOKEN_TTL = 30 * 60  # seconds
+
+AGENTMAIL_API_KEY = os.environ.get('AGENTMAIL_API_KEY', '')
+AGENTMAIL_INBOX_ID = os.environ.get('AGENTMAIL_INBOX_ID', '')
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('DASHBOARD_SECRET') or hashlib.sha256(
@@ -97,6 +105,13 @@ def fetch_one(sql, params=()):
 
 # ── Auth ──────────────────────────────────────────────────────────────────
 
+EMAIL_RE = re.compile(r'^[^@\s]+@[^@\s]+\.[^@\s]+$')
+
+
+def is_valid_email(username):
+    return bool(EMAIL_RE.match(username))
+
+
 def load_users():
     users = {}
     if AUTH_FILE.exists():
@@ -109,18 +124,111 @@ def load_users():
 
 
 def save_user(username, password):
-    pw_hash = hashlib.sha256(password.encode()).hexdigest()
+    if not is_valid_email(username):
+        raise ValueError(f"Username must be a valid email address: {username!r}")
+    pw_hash = generate_password_hash(password)
     users = load_users()
     users[username] = pw_hash
     AUTH_FILE.write_text(''.join(f"{u}:{h}\n" for u, h in users.items()))
     AUTH_FILE.chmod(0o600)
 
 
+def _is_legacy_sha256(pw_hash):
+    return len(pw_hash) == 64 and all(c in '0123456789abcdef' for c in pw_hash)
+
+
 def check_auth(username, password):
     users = load_users()
-    if username in users:
-        return hashlib.sha256(password.encode()).hexdigest() == users[username]
-    return False
+    if username not in users:
+        return False
+    stored = users[username]
+    if _is_legacy_sha256(stored):
+        if hashlib.sha256(password.encode()).hexdigest() != stored:
+            return False
+        save_user(username, password)  # upgrade to salted hash on successful login
+        return True
+    return check_password_hash(stored, password)
+
+
+# ── Password Reset ───────────────────────────────────────────────────────
+
+_agentmail_client = None
+_agentmail_inbox_id = AGENTMAIL_INBOX_ID
+
+
+def get_agentmail_client():
+    """Lazily build the AgentMail client. Returns None if no API key is configured."""
+    global _agentmail_client
+    if _agentmail_client is None and AGENTMAIL_API_KEY:
+        from agentmail import AgentMail
+        _agentmail_client = AgentMail(api_key=AGENTMAIL_API_KEY)
+    return _agentmail_client
+
+
+def get_agentmail_inbox_id():
+    """Return the inbox to send from, creating one on first use (idempotent via client_id)."""
+    global _agentmail_inbox_id
+    if _agentmail_inbox_id:
+        return _agentmail_inbox_id
+    client = get_agentmail_client()
+    if client is None:
+        return None
+    inbox = client.inboxes.create(client_id='lifttracker-dashboard')
+    _agentmail_inbox_id = inbox.inbox_id
+    return _agentmail_inbox_id
+
+
+def load_reset_tokens():
+    if not RESET_FILE.exists():
+        return {}
+    try:
+        return json.loads(RESET_FILE.read_text())
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_reset_tokens(tokens):
+    RESET_FILE.write_text(json.dumps(tokens))
+    RESET_FILE.chmod(0o600)
+
+
+def create_reset_token(username):
+    now = time.time()
+    tokens = {t: v for t, v in load_reset_tokens().items() if v['expires'] > now}
+    token = secrets.token_urlsafe(32)
+    tokens[token] = {'username': username, 'expires': now + RESET_TOKEN_TTL}
+    save_reset_tokens(tokens)
+    return token
+
+
+def consume_reset_token(token):
+    """Validate and burn a reset token, returning the username or None if invalid/expired."""
+    tokens = load_reset_tokens()
+    entry = tokens.pop(token, None)
+    save_reset_tokens(tokens)
+    if not entry or entry['expires'] < time.time():
+        return None
+    return entry['username']
+
+
+def send_reset_email(to_email, reset_url):
+    client = get_agentmail_client()
+    inbox_id = get_agentmail_inbox_id()
+    if not client or not inbox_id:
+        print(f"[password reset] AGENTMAIL_API_KEY not configured — reset link for {to_email}: {reset_url}")
+        return
+    client.inboxes.messages.send(
+        inbox_id,
+        to=to_email,
+        subject="Reset your LiftTracker password",
+        text=(f"Click the link below to reset your LiftTracker password. "
+              f"This link expires in 30 minutes.\n\n{reset_url}\n\n"
+              f"If you didn't request this, you can ignore this email."),
+        html=(f'<p>Click the link below to reset your LiftTracker password. '
+              f'This link expires in 30 minutes.</p>'
+              f'<p><a href="{reset_url}">{reset_url}</a></p>'
+              f'<p>If you didn\'t request this, you can ignore this email.</p>'),
+    )
 
 
 def require_login(f):
@@ -140,9 +248,12 @@ def setup_auth():
         if yn.lower() != 'y':
             return
     print("Create a dashboard user")
-    username = input("Username: ").strip()
+    username = input("Email: ").strip()
     if not username:
-        print("Username required")
+        print("Email required")
+        return
+    if not is_valid_email(username):
+        print("Username must be a valid email address")
         return
     password = input("Password: ").strip()
     if not password:
@@ -188,6 +299,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
                      cursor: pointer; transition: background .2s; }
 .login-card button:hover { background: #0f3460; }
 .login-card .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #aaa; }
+.login-card .footer a { color: #4fc3f7; text-decoration: none; }
+.login-card .footer a:hover { text-decoration: underline; }
 </style>
 </head>
 <body>
@@ -197,8 +310,8 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
   <div class="error" id="errorMsg"></div>
   <form id="loginForm" onsubmit="return handleLogin(event)">
     <div class="field">
-      <label for="username">Username</label>
-      <input type="text" id="username" name="username" autocomplete="username" required autofocus>
+      <label for="username">Email</label>
+      <input type="email" id="username" name="username" autocomplete="username" required autofocus>
     </div>
     <div class="field">
       <label for="password">Password</label>
@@ -206,7 +319,7 @@ body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-
     </div>
     <button type="submit">Sign In</button>
   </form>
-  <div class="footer">Track your gear. Find the deal.</div>
+  <div class="footer"><a href="/forgot-password">Forgot password?</a></div>
 </div>
 <script>
 async function handleLogin(e) {
@@ -255,6 +368,203 @@ def login_page():
 def logout():
     session.pop('user', None)
     return redirect(url_for('login_page'))
+
+
+FORGOT_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiftTracker — Reset Password</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+       min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.card { background: #fff; border-radius: 16px; padding: 40px; width: 100%;
+        max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.card h1 { font-size: 22px; font-weight: 700; text-align: center; margin-bottom: 4px; }
+.card .subtitle { text-align: center; color: #888; font-size: 14px; margin-bottom: 28px; }
+.card .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+.card .msg.error { background: #ffebee; color: #c62828; }
+.card .msg.ok { background: #e8f5e9; color: #2e7d32; }
+.card .field { margin-bottom: 16px; }
+.card label { display: block; font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px; }
+.card input { width: 100%; padding: 12px 14px; border: 2px solid #e0e0e0;
+              border-radius: 8px; font-size: 15px; transition: border-color .2s; }
+.card input:focus { outline: none; border-color: #4fc3f7; }
+.card button { width: 100%; padding: 12px; background: #1a1a2e; color: #fff;
+               border: none; border-radius: 8px; font-size: 15px; font-weight: 600;
+               cursor: pointer; transition: background .2s; }
+.card button:hover { background: #0f3460; }
+.card .footer { text-align: center; margin-top: 20px; font-size: 12px; color: #aaa; }
+.card .footer a { color: #4fc3f7; text-decoration: none; }
+.card .footer a:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Reset your password</h1>
+  <div class="subtitle">We'll email you a reset link</div>
+  <div class="msg" id="msg"></div>
+  <form id="forgotForm" onsubmit="return handleForgot(event)">
+    <div class="field">
+      <label for="username">Email</label>
+      <input type="email" id="username" name="username" autocomplete="username" required autofocus>
+    </div>
+    <button type="submit">Send Reset Link</button>
+  </form>
+  <div class="footer"><a href="/login">Back to sign in</a></div>
+</div>
+<script>
+async function handleForgot(e) {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  const username = document.getElementById('username').value.trim();
+  msg.style.display = 'none';
+  try {
+    const r = await fetch('/forgot-password', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'username='+encodeURIComponent(username)
+    });
+    const data = await r.json();
+    msg.className = 'msg ok';
+    msg.textContent = data.message || 'If that account exists, a reset link is on its way.';
+    msg.style.display = 'block';
+  } catch (e) {
+    msg.className = 'msg error';
+    msg.textContent = 'Connection error. Try again.';
+    msg.style.display = 'block';
+  }
+  return false;
+}
+</script>
+</body>
+</html>"""
+
+
+RESET_HTML = r"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LiftTracker — Set New Password</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+       background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+       min-height: 100vh; display: flex; align-items: center; justify-content: center; }
+.card { background: #fff; border-radius: 16px; padding: 40px; width: 100%;
+        max-width: 400px; box-shadow: 0 20px 60px rgba(0,0,0,.3); }
+.card h1 { font-size: 22px; font-weight: 700; text-align: center; margin-bottom: 24px; }
+.card .msg { padding: 10px 14px; border-radius: 8px; font-size: 13px; margin-bottom: 16px; display: none; }
+.card .msg.error { background: #ffebee; color: #c62828; }
+.card .msg.ok { background: #e8f5e9; color: #2e7d32; }
+.card .field { margin-bottom: 16px; }
+.card label { display: block; font-size: 13px; font-weight: 600; color: #555; margin-bottom: 4px; }
+.card input { width: 100%; padding: 12px 14px; border: 2px solid #e0e0e0;
+              border-radius: 8px; font-size: 15px; transition: border-color .2s; }
+.card input:focus { outline: none; border-color: #4fc3f7; }
+.card button { width: 100%; padding: 12px; background: #1a1a2e; color: #fff;
+               border: none; border-radius: 8px; font-size: 15px; font-weight: 600;
+               cursor: pointer; transition: background .2s; }
+.card button:hover { background: #0f3460; }
+</style>
+</head>
+<body>
+<div class="card">
+  <h1>Set a new password</h1>
+  <div class="msg" id="msg"></div>
+  <form id="resetForm" onsubmit="return handleReset(event)">
+    <div class="field">
+      <label for="password">New password</label>
+      <input type="password" id="password" name="password" autocomplete="new-password" required>
+    </div>
+    <div class="field">
+      <label for="confirm">Confirm password</label>
+      <input type="password" id="confirm" name="confirm" autocomplete="new-password" required>
+    </div>
+    <button type="submit">Update Password</button>
+  </form>
+</div>
+<script>
+async function handleReset(e) {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  const password = document.getElementById('password').value;
+  const confirm = document.getElementById('confirm').value;
+  msg.style.display = 'none';
+  if (password !== confirm) {
+    msg.className = 'msg error'; msg.textContent = "Passwords don't match"; msg.style.display = 'block';
+    return false;
+  }
+  try {
+    const r = await fetch(window.location.pathname + window.location.search, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: 'password='+encodeURIComponent(password)+'&confirm='+encodeURIComponent(confirm)
+    });
+    const data = await r.json();
+    if (r.ok) {
+      msg.className = 'msg ok';
+      msg.textContent = 'Password updated. Redirecting to sign in…';
+      msg.style.display = 'block';
+      setTimeout(() => { window.location.href = '/login'; }, 1500);
+    } else {
+      msg.className = 'msg error';
+      msg.textContent = data.error || 'Something went wrong';
+      msg.style.display = 'block';
+    }
+  } catch (e) {
+    msg.className = 'msg error';
+    msg.textContent = 'Connection error. Try again.';
+    msg.style.display = 'block';
+  }
+  return false;
+}
+</script>
+</body>
+</html>"""
+
+
+@app.route('/forgot-password', methods=['GET', 'POST'])
+def forgot_password():
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        generic = {'message': "If that account exists, a reset link is on its way."}
+        if is_valid_email(username) and username in load_users():
+            token = create_reset_token(username)
+            reset_url = url_for('reset_password', token=token, _external=True)
+            send_reset_email(username, reset_url)
+        return jsonify(generic)
+    return render_template_string(FORGOT_HTML)
+
+
+@app.route('/reset-password', methods=['GET', 'POST'])
+def reset_password():
+    token = request.args.get('token', '')
+    if request.method == 'POST':
+        password = request.form.get('password', '').strip()
+        confirm = request.form.get('confirm', '').strip()
+        if not password or password != confirm:
+            return jsonify({'error': "Passwords don't match"}), 400
+        username = consume_reset_token(token)
+        if not username:
+            return jsonify({'error': 'This reset link is invalid or has expired'}), 400
+        save_user(username, password)
+        return jsonify({'ok': True})
+    # GET — show the form only if the token still looks valid
+    tokens = load_reset_tokens()
+    entry = tokens.get(token)
+    if not entry or entry['expires'] < time.time():
+        return render_template_string(
+            FORGOT_HTML.replace(
+                '<div class="msg" id="msg"></div>',
+                '<div class="msg error" style="display:block">This reset link is invalid or has expired. Request a new one below.</div>'
+            )
+        )
+    return render_template_string(RESET_HTML)
 
 
 # ── HTML Template ─────────────────────────────────────────────────────────
@@ -765,10 +1075,9 @@ def main():
         print("Run a scrape first:  python scraper/run_scrape.py")
         sys.exit(1)
 
-    # Auto-create default admin/admin on first run (Replit/ephemeral friendly)
-    if not AUTH_FILE.exists():
-        save_user('admin', 'admin')
-        print("   Created default credentials: admin / admin")
+    if not AUTH_FILE.exists() or not load_users():
+        print(f"Error: no dashboard users configured. Run:  python dashboard.py --setup-auth")
+        sys.exit(1)
 
     db_source = 'Neon PostgreSQL' if DATABASE_URL else f'SQLite ({DB_PATH})'
     print(f"🏋️  LiftTracker Dashboard")

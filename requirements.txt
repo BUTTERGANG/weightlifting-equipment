@@ -6,3 +6,4 @@ lxml>=5.1
 playwright>=1.40
 gunicorn>=21.2
 rapidfuzz>=3.0
+agentmail>=0.1
