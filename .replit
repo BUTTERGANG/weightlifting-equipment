@@ -1,0 +1,71 @@
+modules = ["python-3.12", "web"]
+
+[nix]
+channel = "stable-25_05"
+packages = ["chromium", "libxcrypt", "gcc-unwrapped"]
+
+[env]
+CLAUDE_CONFIG_DIR = "/home/runner/workspace/.local/state/claude"
+
+[[ports]]
+localPort = 8080
+externalPort = 80
+
+[deployment]
+deploymentTarget = "autoscale"
+build = ["bash", "-c", "pip install -q -r requirements.txt && python -m playwright install chromium --with-deps 2>/dev/null || true"]
+run = ["python", "dashboard.py"]
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Dashboard"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Full Scrape"
+
+[[workflows.workflow]]
+name = "Dashboard"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pip install -q -r requirements.txt && python dashboard.py"
+waitForPort = 8080
+
+[[workflows.workflow]]
+name = "Full Scrape"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pip install -q -r requirements.txt && python -m playwright install chromium --with-deps 2>/dev/null && python scraper/run_scrape.py"
+
+[[workflows.workflow]]
+name = "Scrape HTTP Sites"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "pip install -q -r requirements.txt && python scraper/run_scrape.py --http-only"
+
+[agent]
+expertMode = true
+integrations = ["github:1.0.0"]
