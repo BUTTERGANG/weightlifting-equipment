@@ -21,9 +21,11 @@ import secrets
 import sqlite3
 import hashlib
 import argparse
+import threading
 from pathlib import Path
 from datetime import datetime
 from functools import wraps
+from collections import defaultdict
 from flask import Flask, g, request, jsonify, render_template_string, session, redirect, url_for
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -268,6 +270,29 @@ def setup_auth():
     print(f"Auth file: {AUTH_FILE}")
 
 
+# ── Rate Limiting ────────────────────────────────────────────────────────
+# In-process, per-worker sliding-window limiter. Good enough to blunt brute-force
+# and reset-email-spam at this traffic level; not shared across gunicorn workers.
+
+_rate_limit_lock = threading.Lock()
+_rate_limit_buckets = defaultdict(list)
+
+
+def rate_limited(key, max_attempts, window_seconds):
+    """Record an attempt for `key` and return True if it has exceeded max_attempts
+    within the trailing window_seconds."""
+    now = time.time()
+    with _rate_limit_lock:
+        attempts = [t for t in _rate_limit_buckets[key] if t > now - window_seconds]
+        attempts.append(now)
+        _rate_limit_buckets[key] = attempts
+        return len(attempts) > max_attempts
+
+
+def client_ip():
+    return request.headers.get('X-Forwarded-For', request.remote_addr or 'unknown').split(',')[0].strip()
+
+
 # ── Login Page & Routes ─────────────────────────────────────────────────────
 
 LOGIN_HTML = r"""<!DOCTYPE html>
@@ -352,6 +377,8 @@ async function handleLogin(e) {
 @app.route('/login', methods=['GET', 'POST'])
 def login_page():
     if request.method == 'POST':
+        if rate_limited(f'login:{client_ip()}', max_attempts=10, window_seconds=300):
+            return jsonify({'error': 'Too many login attempts. Try again in a few minutes.'}), 429
         username = request.form.get('username', '').strip()
         password = request.form.get('password', '').strip()
         if check_auth(username, password):
@@ -531,9 +558,13 @@ async function handleReset(e) {
 @app.route('/forgot-password', methods=['GET', 'POST'])
 def forgot_password():
     if request.method == 'POST':
+        if rate_limited(f'forgot:{client_ip()}', max_attempts=5, window_seconds=300):
+            return jsonify({'error': 'Too many requests. Try again in a few minutes.'}), 429
         username = request.form.get('username', '').strip()
         generic = {'message': "If that account exists, a reset link is on its way."}
-        if is_valid_email(username) and username in load_users():
+        # Per-email throttle is silent (still returns `generic`) so it can't be used to enumerate accounts.
+        if (is_valid_email(username) and username in load_users()
+                and not rate_limited(f'forgot-email:{username}', max_attempts=3, window_seconds=900)):
             token = create_reset_token(username)
             reset_url = url_for('reset_password', token=token, _external=True)
             send_reset_email(username, reset_url)
