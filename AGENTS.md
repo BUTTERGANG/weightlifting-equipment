@@ -130,3 +130,12 @@ See AGENT-PLAYBOOK for the full archive. Relevant to this project:
 - Chrome on Replit: install via nix channel + `playwright install chromium --with-deps`
 - Auth persistence: pin `CLAUDE_CONFIG_DIR` in `.replit`
 - Preview port: Replit only exposes 80 and 443; map via `[[ports]]` in `.replit`
+- Claude Code CLI "disappearing" after a restart: `/home/runner` is an ephemeral
+  overlay fs, only `/home/runner/workspace` persists. The installer's binaries
+  already land in the persisted path, but the `~/.local/bin/claude` PATH symlink
+  it creates does not survive a restart, and neither does anything written to
+  `~/.bashrc`. Fix: a self-healing launcher lives at
+  `workspace/.local/bin/claude` (execs the newest dir under
+  `workspace/.local/share/claude/versions/`), and `PATH` is extended to include
+  it via `.replit`'s `[env]` block — `.replit` is a repo file, so it's always
+  reapplied at boot regardless of what happened to `$HOME`.

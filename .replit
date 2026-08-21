@@ -6,6 +6,7 @@ packages = ["chromium", "libxcrypt", "gcc-unwrapped"]
 
 [env]
 CLAUDE_CONFIG_DIR = "/home/runner/workspace/.local/state/claude"
+PATH = "/home/runner/workspace/.local/bin:$PATH"
 
 [[ports]]
 localPort = 8080
