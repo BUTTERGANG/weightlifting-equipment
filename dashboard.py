@@ -306,6 +306,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
 :root {
+  color-scheme: dark;
   --bg-base: #090b10;
   --bg-surface: #11141d;
   --bg-card: #161b26;
@@ -318,6 +319,24 @@ LOGIN_HTML = r"""<!DOCTYPE html>
   --accent-orange: #f97316;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html {
+  background-color: #090b10;
+  color-scheme: dark;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #090b10;
+}
+::-webkit-scrollbar-thumb {
+  background: #232938;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
+}
 body {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   background: radial-gradient(circle at 50% 20%, #151b2a 0%, var(--bg-base) 80%);
@@ -547,6 +566,7 @@ FORGOT_HTML = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
 :root {
+  color-scheme: dark;
   --bg-base: #090b10;
   --bg-surface: #11141d;
   --bg-card: #161b26;
@@ -557,6 +577,24 @@ FORGOT_HTML = r"""<!DOCTYPE html>
   --accent-green: #10b981;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html {
+  background-color: #090b10;
+  color-scheme: dark;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #090b10;
+}
+::-webkit-scrollbar-thumb {
+  background: #232938;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
+}
 body {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   background: radial-gradient(circle at 50% 20%, #151b2a 0%, var(--bg-base) 80%);
@@ -653,6 +691,7 @@ RESET_HTML = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
 :root {
+  color-scheme: dark;
   --bg-base: #090b10;
   --bg-surface: #11141d;
   --bg-card: #161b26;
@@ -663,6 +702,24 @@ RESET_HTML = r"""<!DOCTYPE html>
   --accent-green: #10b981;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html {
+  background-color: #090b10;
+  color-scheme: dark;
+}
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #090b10;
+}
+::-webkit-scrollbar-thumb {
+  background: #232938;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
+}
 body {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   background: radial-gradient(circle at 50% 20%, #151b2a 0%, var(--bg-base) 80%);
@@ -814,6 +871,7 @@ ERROR_404_HTML = r"""<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <style>
 :root {
+  color-scheme: dark;
   --bg-base: #090b10;
   --bg-surface: #10141d;
   --border: #22293b;
@@ -822,6 +880,10 @@ ERROR_404_HTML = r"""<!DOCTYPE html>
   --text-muted: #94a3b8;
 }
 * { margin: 0; padding: 0; box-sizing: border-box; }
+html {
+  background-color: #090b10;
+  color-scheme: dark;
+}
 body {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
   background: radial-gradient(circle at 50% 30%, #151b2a 0%, var(--bg-base) 80%);
@@ -902,6 +964,7 @@ HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
 :root {
+  color-scheme: dark;
   --bg-base: #090b10;
   --bg-surface: #10141d;
   --bg-card: #151a26;
@@ -929,6 +992,32 @@ HTML = r"""<!DOCTYPE html>
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
+
+html {
+  background-color: #090b10;
+  color-scheme: dark;
+}
+
+/* Custom Scrollbars in Dark Mode */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #090b10;
+}
+::-webkit-scrollbar-thumb {
+  background: #22293b;
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #38bdf8;
+}
+
+select option {
+  background-color: #111622;
+  color: #f8fafc;
+}
 
 body {
   font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
