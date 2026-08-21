@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Plate Magnet — Equipment Price Intelligence</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/dashboard.css') }}">
+<script src="{{ url_for('static', filename='js/vendor/chart.min.js') }}"></script>
+</head>
+<body>
+<header>
+  <div class="nav-container">
+    <a href="/" class="brand">
+      <div class="brand-icon">⚡</div>
+      <div class="brand-title">PLATE<span>MAGNET</span></div>
+      <div class="brand-badge">PRO RADAR</div>
+    </a>
+    <div class="nav-actions">
+      <div class="scrape-pulse" onclick="openScrapeModal()" title="View scrape history / run a scrape">
+        <div class="pulse-dot" id="pulseDot"></div>
+        <span>Sync: <strong id="lastScrape" style="color:#fff">—</strong></span>
+      </div>
+      <div class="user-pill">
+        <div class="user-avatar" id="userInitial">A</div>
+        <span id="userName">admin</span>
+      </div>
+      <a href="/logout" class="btn-ghost">Sign Out</a>
+    </div>
+  </div>
+</header>
+
+<main class="app-layout">
+
+  <!-- Metrics Overview -->
+  <section class="metrics-grid">
+    <div class="metric-card card-prods">
+      <div class="metric-header">
+        <span class="metric-label">Tracked Catalog</span>
+        <span class="metric-icon">📦</span>
+      </div>
+      <div class="metric-val" id="metricTotalProds">—</div>
+      <div class="metric-sub highlight">Across all major equipment brands</div>
+    </div>
+
+    <div class="metric-card card-deals">
+      <div class="metric-header">
+        <span class="metric-label">Active Price Drops</span>
+        <span class="metric-icon">🔥</span>
+      </div>
+      <div class="metric-val" id="metricTotalDeals" style="color:var(--emerald)">—</div>
+      <div class="metric-sub good">Items &gt;10% below historical avg</div>
+    </div>
+
+    <div class="metric-card card-stores">
+      <div class="metric-header">
+        <span class="metric-label">Retailer Network</span>
+        <span class="metric-icon">🏪</span>
+      </div>
+      <div class="metric-val" id="metricTotalStores">—</div>
+      <div class="metric-sub" id="metricCategoryCount">— categories indexed</div>
+    </div>
+
+    <div class="metric-card card-avg">
+      <div class="metric-header">
+        <span class="metric-label">Catalog Price Range</span>
+        <span class="metric-icon">🏷️</span>
+      </div>
+      <div class="metric-val" id="metricPriceRange" style="font-size:22px">—</div>
+      <div class="metric-sub" id="metricAvgPrice">Avg price: —</div>
+    </div>
+  </section>
+
+  <!-- Category rail + results -->
+  <div class="workspace">
+
+  <!-- Category rail: the primary way into the catalogue -->
+  <aside class="category-rail" id="categoryRail">
+    <div class="rail-header">
+      <span>Categories</span>
+      <button class="rail-toggle" id="railToggle" onclick="toggleRail()"
+              aria-label="Collapse categories" aria-expanded="true">‹</button>
+    </div>
+    <nav class="rail-list" id="railList" aria-label="Product categories"></nav>
+  </aside>
+
+  <div class="workspace-main">
+
+  <!-- Filter & Control Bar -->
+  <section class="control-bar">
+    <div class="search-group">
+      <span class="search-icon">🔍</span>
+      <input type="search" class="search-input" id="searchBox" placeholder="Filter barbells, plates, racks, belts, shoes, brands..." oninput="applyFilters()">
+    </div>
+
+    <div class="filter-group">
+      <select id="filterStore" onchange="applyFilters()">
+        <option value="">All Retailers (28)</option>
+      </select>
+
+      <select id="filterCategory" onchange="applyFilters()"
+              title="The retailer's own label, within the selected category">
+        <option value="">All Store Labels</option>
+      </select>
+
+      <div class="toggle-chip" id="chipDeals" onclick="toggleDealsFilter()">
+        <span class="chip-icon">🔥</span>
+        <span>Deals Only</span>
+      </div>
+
+      <button class="action-btn" onclick="exportFilteredCSV()" title="Export current results as CSV">
+        <span>📥</span> Export CSV
+      </button>
+    </div>
+  </section>
+
+  <!-- Products Data Table -->
+  <section class="table-panel">
+    <div class="table-stats-bar">
+      <div>
+        <span class="crumb" id="activeCrumb">All Equipment</span>
+        Showing <strong id="resultCount" style="color:#fff">0</strong> items
+      </div>
+      <div class="stats-right">
+        <span id="filterSummary">Viewing all equipment</span>
+        <button class="clear-filters" id="clearFilters" onclick="clearAllFilters()"
+                style="display:none">Clear filters ✕</button>
+      </div>
+    </div>
+
+    <div class="table-responsive">
+      <table>
+        <thead>
+          <tr>
+            <th class="prod-thumb-col"></th>
+            <th onclick="sortBy('name')" style="min-width:320px">
+              Equipment / Item <span class="sort-arrow" id="s-name">↓</span>
+            </th>
+            <th onclick="sortBy('site')">
+              Store <span class="sort-arrow" id="s-site">↓</span>
+            </th>
+            <th onclick="sortBy('category')">
+              Category <span class="sort-arrow" id="s-category">↓</span>
+            </th>
+            <th onclick="sortBy('price')">
+              Current Price <span class="sort-arrow" id="s-price">↓</span>
+            </th>
+            <th onclick="sortBy('deal')">
+              Deal Status <span class="sort-arrow" id="s-deal">↓</span>
+            </th>
+            <th style="text-align:right">Detail</th>
+          </tr>
+        </thead>
+        <tbody id="productBody">
+          <!-- Rows inserted via JS -->
+        </tbody>
+      </table>
+    </div>
+
+    <div class="table-pagination">
+      <span id="pageInfo">Page 1 of 1</span>
+      <div class="page-controls">
+        <label class="page-size-label" for="pageSizeSelect">Rows</label>
+        <select id="pageSizeSelect" class="page-size" onchange="changePageSize(this.value)">
+          <option value="25">25</option>
+          <option value="50" selected>50</option>
+          <option value="100">100</option>
+          <option value="200">200</option>
+        </select>
+        <button class="page-btn" id="prevPage" onclick="goPage(-1)">← Previous</button>
+        <button class="page-btn" id="nextPage" onclick="goPage(1)">Next →</button>
+      </div>
+    </div>
+  </section>
+
+  </div><!-- /workspace-main -->
+  </div><!-- /workspace -->
+
+</main>
+
+<!-- Scrape History Modal -->
+<div class="modal-overlay" id="scrapeModalOverlay" onclick="handleScrapeOverlayClick(event)">
+  <div class="modal-card" id="scrapeModalCard" style="max-width:640px">
+    <div class="modal-header">
+      <div class="modal-title-area">
+        <h2>Scrape Activity</h2>
+        <div class="modal-meta-row">
+          <span class="scrape-schedule-note" id="scrapeScheduleNote">—</span>
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeScrapeModal()">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="scrape-toolbar">
+        <div id="scrapeError" style="color:var(--rose);font-size:13px;display:none"></div>
+        <button class="action-btn" id="runScrapeBtn" onclick="triggerScrape()">
+          <span>🔄</span> <span id="runScrapeBtnLabel">Run Scrape Now</span>
+        </button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="scrape-run-table">
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Trigger</th>
+              <th>Status</th>
+              <th>Products</th>
+            </tr>
+          </thead>
+          <tbody id="scrapeRunsBody">
+            <tr><td colspan="4" class="scrape-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modern Detail Modal -->
+<div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
+  <div class="modal-card" id="modalCard">
+    <div class="modal-header">
+      <div class="modal-title-area">
+        <h2 id="detailName">Product Title</h2>
+        <div class="modal-meta-row">
+          <span id="detailStoreBadge" class="store-badge">Store</span>
+          <span id="detailCatPill" class="cat-pill">Category</span>
+          <a id="detailExternalLink" href="#" target="_blank" rel="noopener noreferrer" class="action-btn" style="padding:3px 10px;font-size:12px">
+            Official Store ↗
+          </a>
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeModal()">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <!-- Product image -->
+      <div class="detail-hero" id="detailHero"></div>
+
+      <!-- Hot Deal Banner if applicable -->
+      <div id="detailDealBanner" class="deal-banner" style="display:none">
+        <div class="deal-banner-left">
+          <div class="deal-pct-huge" id="detailDealPct">-25%</div>
+          <div>
+            <div style="font-weight:700;color:#fff;font-size:15px">Verified Price Drop</div>
+            <div style="color:var(--text-muted);font-size:13px" id="detailDealStats">Current $150 vs Average $200</div>
+          </div>
+        </div>
+        <div class="deal-badge" style="padding:6px 12px;font-size:13px">🔥 HOT DEAL</div>
+      </div>
+
+      <!-- Price History Chart -->
+      <div class="chart-wrapper">
+        <div class="chart-title">
+          <span>Price Timeline & Historical Fluctuations</span>
+          <span id="detailDataPointsCount" style="color:var(--text-muted)">0 data points</span>
+        </div>
+        <canvas id="priceChart" style="max-height:260px;width:100%"></canvas>
+      </div>
+
+      <!-- Cross Store Matches -->
+      <div id="matchesSection" class="matches-box" style="display:none">
+        <div class="section-head">
+          <span>🔗 Cross-Store Alternatives & Competing Gear</span>
+        </div>
+        <table class="mini-table">
+          <thead>
+            <tr>
+              <th>Store</th>
+              <th>Alternative Product</th>
+              <th>Price</th>
+              <th>Match Confidence</th>
+            </tr>
+          </thead>
+          <tbody id="matchesBody"></tbody>
+        </table>
+      </div>
+
+      <!-- Price History Raw Table -->
+      <div class="matches-box">
+        <div class="section-head">
+          <span>📜 Scrape Audit Log</span>
+        </div>
+        <table class="mini-table">
+          <thead>
+            <tr>
+              <th>Timestamp</th>
+              <th>Recorded Price</th>
+              <th>Direct Link</th>
+            </tr>
+          </thead>
+          <tbody id="historyBody"></tbody>
+        </table>
+      </div>
+
+    </div>
+  </div>
+</div>
+<script>const CSRF_TOKEN = {{ csrf_token|tojson }};</script>
+<script src="{{ url_for('static', filename='js/dashboard.js') }}"></script>
+</body>
+</html>

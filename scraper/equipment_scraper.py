@@ -12,17 +12,28 @@ Usage:
 """
 
 import re
+import os
 import json
 import sys
+import time
+import random
 import argparse
 import csv
 import io
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from bs4 import BeautifulSoup
+
+class ScrapeBlocked(RuntimeError):
+    """The store refused or throttled us. Distinct from "the store has no
+    products", so a blocked run is reported as an error instead of silently
+    shipping an empty catalogue."""
+
 
 HEADERS = {
     'User-Agent': ('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
@@ -431,23 +442,80 @@ def safe_price(val):
         return None
 
 
-def fetch_page(url):
-    for attempt in range(2):
+# ── Polite HTTP ───────────────────────────────────────────────────────────
+# Shopify rate-limits per IP across every store on the platform, so scraping
+# several Shopify storefronts in parallel trips a shared budget: a full run
+# followed too closely by another returned 429 for 23 of 26 stores. The old
+# code made this invisible — the Shopify/Magento/WooCommerce extractors called
+# requests.get directly and treated any non-200 as "no more pages", so a
+# throttled store silently produced zero products and the scrape still reported
+# success. Everything now goes through http_get, which retries 429/5xx with
+# exponential backoff and keeps a minimum gap between requests to one host.
+
+_host_lock = threading.Lock()
+_host_next_allowed = {}
+
+MIN_HOST_INTERVAL = float(os.environ.get('SCRAPE_HOST_INTERVAL', '0.7'))  # seconds
+MAX_RETRIES = 4
+
+
+def _throttle(host):
+    """Block until this host's minimum request interval has elapsed."""
+    while True:
+        with _host_lock:
+            now = time.monotonic()
+            ready_at = _host_next_allowed.get(host, 0.0)
+            if now >= ready_at:
+                _host_next_allowed[host] = now + MIN_HOST_INTERVAL
+                return
+            wait = ready_at - now
+        time.sleep(wait)
+
+
+def http_get(url, params=None, timeout=TIMEOUT, headers=None):
+    """GET with per-host throttling and backoff. Returns a Response or None.
+
+    Returns None only after the retries are exhausted or the server gave a
+    definite non-retryable answer, so callers can distinguish "no more data"
+    (200 with an empty body) from "we were blocked" (None).
+    """
+    host = urlparse(url).netloc
+    delay = 2.0
+    for attempt in range(MAX_RETRIES):
+        _throttle(host)
         try:
-            r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-            if r.status_code == 200:
-                return r.text
-            elif r.status_code == 429:
-                import time
-                wait = int(r.headers.get('Retry-After', 5))
-                time.sleep(wait)
-                continue
-            else:
-                return None
+            r = requests.get(url, params=params, headers=headers or HEADERS,
+                             timeout=timeout)
         except requests.RequestException:
-            import time
-            time.sleep(2)
+            time.sleep(delay + random.uniform(0, 0.5))
+            delay *= 2
+            continue
+
+        if r.status_code == 200:
+            return r
+        if r.status_code in (429, 503):
+            try:
+                wait = float(r.headers.get('Retry-After', delay))
+            except (TypeError, ValueError):
+                wait = delay
+            wait = min(max(wait, 1.0), 60.0)
+            # Back the whole host off, not just this request.
+            with _host_lock:
+                _host_next_allowed[host] = time.monotonic() + wait
+            time.sleep(wait + random.uniform(0, 0.5))
+            delay *= 2
+            continue
+        if 500 <= r.status_code < 600:
+            time.sleep(delay + random.uniform(0, 0.5))
+            delay *= 2
+            continue
+        return None       # 404 and friends: no point retrying
     return None
+
+
+def fetch_page(url):
+    r = http_get(url)
+    return r.text if r is not None else None
 
 
 # ── Parser: Shopify public /products.json API ────────────────────────────
@@ -469,10 +537,10 @@ def extract_shopify_collection_json(collection_url, currency='USD', min_price=1.
     page = 1
 
     while page <= 20:  # safety cap — no collection realistically has 5000+ items
-        r = requests.get(f'{base}/products.json', params={'limit': 250, 'page': page},
-                          headers=HEADERS, timeout=TIMEOUT)
-        if r.status_code != 200:
-            break
+        r = http_get(f'{base}/products.json', params={'limit': 250, 'page': page})
+        if r is None:
+            # Blocked or unreachable — distinct from "collection is empty".
+            raise ScrapeBlocked(f'{domain} did not answer /products.json (page {page})')
         try:
             items = r.json().get('products', [])
         except ValueError:
@@ -525,8 +593,10 @@ def extract_magento(base_url, currency='USD'):
 
     while True:
         url = f"{base_url}?p={page}"
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if r.status_code != 200:
+        r = http_get(url)
+        if r is None:
+            if page == 1:
+                raise ScrapeBlocked(f'{base_url} did not answer')
             break
         soup = BeautifulSoup(r.text, 'lxml')
         items = soup.select('.product-item')
@@ -578,10 +648,15 @@ def extract_woocommerce_store(url_base, currency='USD'):
 
     while True:
         url = f"{url_base}?per_page=100&page={page}"
-        r = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        if r.status_code != 200:
+        r = http_get(url)
+        if r is None:
+            if page == 1:
+                raise ScrapeBlocked(f'{url_base} did not answer')
             break
-        items = r.json()
+        try:
+            items = r.json()
+        except ValueError:
+            break
         if not items:
             break
 
@@ -764,21 +839,31 @@ def scrape_site(site_key, config):
 
     parser = config.get('parser', '')
     all_products = []
+    # Buffered so parallel workers don't interleave their output.
+    log = []
+    empty_categories = []
+    blocked = []
 
     # Special case: WooCommerce Store API (no category iteration)
     if parser == 'woocommerce_store':
         api_url = config.get('api_url', '')
-        products = extract_woocommerce_store(api_url, config.get('currency', 'USD'))
+        try:
+            products = extract_woocommerce_store(api_url, config.get('currency', 'USD'))
+        except ScrapeBlocked as e:
+            return {'site': config['name'], 'status': 'blocked', 'error': str(e),
+                    'products': [], 'log': [f'  BLOCKED — {e}']}
         for p in products:
             p['site'] = config['name']
             p['category'] = 'All'
             p['source_url'] = api_url
         all_products.extend(products)
-        print(f'  All products: {len(products)}')
+        log.append(f'  All products: {len(products)}')
         return {
             'site': config['name'],
             'status': 'ok' if all_products else 'empty',
             'products': all_products,
+            'log': log,
+            'empty_categories': [] if all_products else ['All'],
             'scraped_at': datetime.now(timezone.utc).isoformat(),
         }
 
@@ -789,17 +874,27 @@ def scrape_site(site_key, config):
         if parser == 'liftinglarge' and '?' not in url:
             url = url + '?viewall=1'
 
-        if parser == 'magento':
-            # Magento handles fetching + pagination internally
-            products = extract_magento(url, config.get('currency', 'USD'))
-        elif parser == 'shopify_preload':
-            # Hits the collection's /products.json API directly — no need to
-            # fetch/parse the HTML page for this parser.
-            products = extract_shopify_collection_json(url, config.get('currency', 'USD'))
-        else:
+        try:
+            if parser == 'magento':
+                # Magento handles fetching + pagination internally
+                products = extract_magento(url, config.get('currency', 'USD'))
+            elif parser == 'shopify_preload':
+                # Hits the collection's /products.json API directly — no need to
+                # fetch/parse the HTML page for this parser.
+                products = extract_shopify_collection_json(
+                    url, config.get('currency', 'USD'))
+            else:
+                products = None
+        except ScrapeBlocked as e:
+            log.append(f'  {category}: BLOCKED — {e}')
+            blocked.append(category)
+            continue
+
+        if products is None:
             html = fetch_page(url)
             if not html:
-                print(f'  {category}: failed ({url})')
+                log.append(f'  {category}: FAILED to fetch ({url})')
+                empty_categories.append(category)
                 continue
 
             if parser == 'liftinglarge':
@@ -815,53 +910,98 @@ def scrape_site(site_key, config):
             p['source_url'] = url
 
         all_products.extend(products)
-        print(f'  {category}: {len(products)} products')
+        log.append(f'  {category}: {len(products)} products')
+        if not products:
+            empty_categories.append(category)
+
+    if blocked and not all_products:
+        # Every category we tried was refused — report it as an error rather
+        # than an empty store, so the run surfaces it.
+        return {
+            'site': config['name'],
+            'log': log,
+            'status': 'blocked',
+            'error': f'rate-limited or blocked on {len(blocked)} categories',
+            'empty_categories': empty_categories,
+            'blocked_categories': blocked,
+            'products': [],
+        }
 
     return {
         'site': config['name'],
+        'log': log,
+        'empty_categories': empty_categories,
+        'blocked_categories': blocked,
         'status': 'ok' if all_products else 'empty',
         'products': all_products,
         'scraped_at': datetime.now(timezone.utc).isoformat(),
     }
 
 
-def scrape_all(site_filter=None, category_filter=None, use_browser=False):
+def _scrape_one(key, config, use_browser):
+    """Scrape a single site. Always returns a result dict, never raises."""
+    name = config['name']
+    if config.get('requires_browser') and not use_browser:
+        return {'site': name, 'status': 'requires_browser', 'products': []}
+    try:
+        if config.get('requires_browser'):
+            import importlib
+            browser_mod = importlib.import_module('browser_scraper')
+            browser_key = config.get('browser_key')
+            items = browser_mod.scrape_site_playwright(
+                browser_key, browser_mod.SITES[browser_key])
+            return {
+                'site': name,
+                'status': 'ok',
+                'products': items,
+                'scraped_at': datetime.now(timezone.utc).isoformat(),
+            }
+        return scrape_site(key, config)
+    except Exception as e:
+        return {'site': name, 'status': 'error', 'error': str(e), 'products': []}
+
+
+def scrape_all(site_filter=None, category_filter=None, use_browser=False, workers=3):
+    """Scrape every configured site, in parallel.
+
+    Sites are independent and the work is almost entirely network-bound, so a
+    thread pool cuts a full run from the sum of all sites to roughly the slowest
+    one. Playwright's sync API is not thread-safe, so browser sites are scraped
+    on the calling thread after the HTTP pool drains.
+    """
+    targets = [(k, c) for k, c in SITES.items() if not site_filter or k == site_filter]
+    http_targets = [(k, c) for k, c in targets if not c.get('requires_browser')]
+    browser_targets = [(k, c) for k, c in targets if c.get('requires_browser')]
+
     results = []
+    if http_targets:
+        with ThreadPoolExecutor(max_workers=max(1, workers)) as pool:
+            futures = {pool.submit(_scrape_one, k, c, use_browser): c['name']
+                       for k, c in http_targets}
+            for fut in as_completed(futures):
+                r = fut.result()
+                results.append(r)
+                count = len(r.get('products', []))
+                mark = 'ok' if r['status'] == 'ok' and count else r['status'].upper()
+                print(f'  {r["site"]:26s} {count:5d} products  [{mark}]', flush=True)
+                if r.get('error'):
+                    print(f'      ERROR: {r["error"]}', flush=True)
+                for line in r.get('log', []):
+                    if 'FAILED' in line or ': 0 products' in line:
+                        print(f'    {line.strip()}', flush=True)
 
-    for key, config in SITES.items():
-        if site_filter and key != site_filter:
-            continue
-        if config.get('requires_browser') and not use_browser:
-            results.append({'site': config['name'], 'status': 'requires_browser', 'products': []})
-            print(f'\n── {config["name"]} (requires --browser) ──')
-            continue
+    for k, c in browser_targets:
+        print(f'\n── {c["name"]} ──', flush=True)
+        r = _scrape_one(k, c, use_browser)
+        results.append(r)
+        print(f'  {len(r.get("products", []))} products  [{r["status"]}]', flush=True)
+        if r.get('error'):
+            print(f'  ERROR: {r["error"]}', flush=True)
 
-        print(f'\n── {config["name"]} ──')
-        try:
-            if config.get('requires_browser'):
-                # Use Playwright-based browser scraper for all browser sites
-                import importlib
-                browser_mod = importlib.import_module('browser_scraper')
-                browser_key = config.get('browser_key')
-                rogue_products = browser_mod.scrape_site_playwright(
-                    browser_key,
-                    browser_mod.SITES[browser_key],
-                )
-                result = {
-                    'site': config['name'],
-                    'status': 'ok',
-                    'products': rogue_products,
-                    'scraped_at': datetime.now(timezone.utc).isoformat(),
-                }
-                print(f'  Total: {len(rogue_products)} products')
-            else:
-                result = scrape_site(key, config)
-            results.append(result)
-        except Exception as e:
-            print(f'  ERROR: {e}')
-            results.append({'site': config['name'], 'status': 'error', 'error': str(e)})
+    # Keep output order stable regardless of completion order.
+    order = {c['name']: i for i, (_, c) in enumerate(targets)}
+    results.sort(key=lambda r: order.get(r['site'], 999))
 
-    # Flatten
     all_products = []
     for r in results:
         all_products.extend(r.get('products', []))
@@ -869,7 +1009,7 @@ def scrape_all(site_filter=None, category_filter=None, use_browser=False):
     if category_filter:
         all_products = [
             p for p in all_products
-            if category_filter.lower() in p.get('category', '').lower()
+            if category_filter.lower() in (p.get('category') or '').lower()
         ]
 
     return results, all_products

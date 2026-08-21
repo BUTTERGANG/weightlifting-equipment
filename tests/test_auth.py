@@ -4,6 +4,7 @@ import time
 import pytest
 
 import dashboard
+from conftest import PASSWORD
 
 
 @pytest.fixture(autouse=True)
@@ -22,51 +23,79 @@ def test_is_valid_email():
 
 def test_save_user_rejects_non_email():
     with pytest.raises(ValueError):
-        dashboard.save_user('admin', 'pw')
+        dashboard.save_user('admin', PASSWORD)
+
+
+def test_save_user_rejects_short_password():
+    with pytest.raises(ValueError, match='at least'):
+        dashboard.save_user('a@b.com', 'short')
+
+
+def test_validate_password_enforces_minimum():
+    assert dashboard.validate_password('') == 'Password required'
+    assert 'at least' in dashboard.validate_password('a' * (dashboard.MIN_PASSWORD_LENGTH - 1))
+    assert dashboard.validate_password('a' * dashboard.MIN_PASSWORD_LENGTH) is None
 
 
 def test_save_and_check_auth_roundtrip():
-    dashboard.save_user('a@b.com', 'secret')
-    assert dashboard.check_auth('a@b.com', 'secret')
-    assert not dashboard.check_auth('a@b.com', 'wrong')
-    assert not dashboard.check_auth('nobody@b.com', 'secret')
+    dashboard.save_user('a@b.com', PASSWORD)
+    assert dashboard.check_auth('a@b.com', PASSWORD)
+    assert not dashboard.check_auth('a@b.com', 'wrong-password-entirely')
+    assert not dashboard.check_auth('nobody@b.com', PASSWORD)
 
 
 def test_passwords_are_salted():
-    dashboard.save_user('a@b.com', 'secret')
-    dashboard.save_user('c@d.com', 'secret')
+    dashboard.save_user('a@b.com', PASSWORD)
+    dashboard.save_user('c@d.com', PASSWORD)
     users = dashboard.load_users()
     assert users['a@b.com'] != users['c@d.com']  # same password, different salt
     assert not dashboard._is_legacy_sha256(users['a@b.com'])
 
 
 def test_legacy_sha256_hash_upgrades_on_login():
-    legacy_hash = hashlib.sha256('secret'.encode()).hexdigest()
+    legacy_hash = hashlib.sha256(PASSWORD.encode()).hexdigest()
     dashboard.AUTH_FILE.write_text(f'a@b.com:{legacy_hash}\n')
 
-    assert dashboard.check_auth('a@b.com', 'secret')
+    assert dashboard.check_auth('a@b.com', PASSWORD)
 
     upgraded = dashboard.load_users()['a@b.com']
     assert not dashboard._is_legacy_sha256(upgraded)
-    assert dashboard.check_auth('a@b.com', 'secret')  # still works post-upgrade
+    assert dashboard.check_auth('a@b.com', PASSWORD)  # still works post-upgrade
+
+
+def test_legacy_short_password_still_logs_in():
+    """A pre-policy password shorter than the minimum must not lock the user out."""
+    legacy_hash = hashlib.sha256('old'.encode()).hexdigest()
+    dashboard.AUTH_FILE.write_text(f'a@b.com:{legacy_hash}\n')
+    assert dashboard.check_auth('a@b.com', 'old')
 
 
 def test_reset_token_roundtrip():
-    dashboard.save_user('a@b.com', 'old-pw')
+    dashboard.save_user('a@b.com', PASSWORD)
     token = dashboard.create_reset_token('a@b.com')
 
+    assert dashboard.peek_reset_token(token) == 'a@b.com'
     assert dashboard.consume_reset_token(token) == 'a@b.com'
     assert dashboard.consume_reset_token(token) is None  # single use
 
 
+def test_reset_tokens_are_stored_hashed():
+    """The token file must not contain anything usable as a reset link."""
+    dashboard.save_user('a@b.com', PASSWORD)
+    token = dashboard.create_reset_token('a@b.com')
+    assert token not in dashboard.RESET_FILE.read_text()
+    assert hashlib.sha256(token.encode()).hexdigest() in dashboard.RESET_FILE.read_text()
+
+
 def test_reset_token_expires():
-    dashboard.save_user('a@b.com', 'old-pw')
+    dashboard.save_user('a@b.com', PASSWORD)
     token = dashboard.create_reset_token('a@b.com')
 
     tokens = dashboard.load_reset_tokens()
-    tokens[token]['expires'] = time.time() - 1
+    tokens[dashboard._hash_token(token)]['expires'] = time.time() - 1
     dashboard.save_reset_tokens(tokens)
 
+    assert dashboard.peek_reset_token(token) is None
     assert dashboard.consume_reset_token(token) is None
 
 

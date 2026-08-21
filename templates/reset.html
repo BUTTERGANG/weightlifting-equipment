@@ -1,0 +1,50 @@
+{% extends "base_auth.html" %}
+{% block title %}Plate Magnet — Set New Password{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Set New Password</h1>
+  <div class="msg" id="msg"></div>
+  <form id="resetForm" onsubmit="return handleReset(event)">
+    <div class="field">
+      <label for="password">New password</label>
+      <input type="password" id="password" name="password" autocomplete="new-password" placeholder="••••••••" required>
+      <div class="hint">At least {{ min_password_length }} characters.</div>
+    </div>
+    <div class="field">
+      <label for="confirm">Confirm password</label>
+      <input type="password" id="confirm" name="confirm" autocomplete="new-password" placeholder="••••••••" required>
+    </div>
+    <button type="submit">Update Password →</button>
+  </form>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+const MIN_LEN = {{ min_password_length|tojson }};
+async function handleReset(e) {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  const password = document.getElementById('password').value;
+  const confirm = document.getElementById('confirm').value;
+  hideMsg(msg);
+  if (password !== confirm) { showMsg(msg, "Passwords don't match", 'error'); return false; }
+  if (password.length < MIN_LEN) {
+    showMsg(msg, `Password must be at least ${MIN_LEN} characters`, 'error');
+    return false;
+  }
+  try {
+    const {ok, data} = await postForm(window.location.pathname + window.location.search,
+                                      {password, confirm});
+    if (ok) {
+      showMsg(msg, 'Password updated. Redirecting to sign in…', 'ok');
+      setTimeout(() => { window.location.href = '/login'; }, 1500);
+    } else {
+      showMsg(msg, data.error || 'Something went wrong', 'error');
+    }
+  } catch (e) {
+    showMsg(msg, 'Connection error. Try again.', 'error');
+  }
+  return false;
+}
+</script>
+{% endblock %}

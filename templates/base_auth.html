@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{% block title %}Plate Magnet{% endblock %}</title>
+<link rel="icon" type="image/svg+xml" href="{{ url_for('static', filename='favicon.svg') }}">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="{{ url_for('static', filename='css/auth.css') }}">
+</head>
+<body>
+{% block content %}{% endblock %}
+<script>
+// Every state-changing POST carries the session's CSRF token.
+const CSRF_TOKEN = {{ csrf_token|tojson }};
+
+function showMsg(el, text, kind) {
+  el.className = 'msg ' + kind + ' visible';
+  el.textContent = text;
+}
+
+function hideMsg(el) {
+  el.className = el.className.replace(' visible', '');
+}
+
+async function postForm(url, fields) {
+  const body = new URLSearchParams({...fields, csrf_token: CSRF_TOKEN});
+  const r = await fetch(url, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+    body: body.toString()
+  });
+  let data = {};
+  try { data = await r.json(); } catch (e) { /* non-JSON error page */ }
+  return {ok: r.ok, status: r.status, data};
+}
+</script>
+{% block scripts %}{% endblock %}
+</body>
+</html>

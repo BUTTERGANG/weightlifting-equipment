@@ -24,171 +24,29 @@ import io
 from datetime import datetime, timezone
 from pathlib import Path
 
-
-DB_PATH = Path.home() / 'equipment_data' / 'equipment.db'
-
-
-# ── Schema ────────────────────────────────────────────────────────────────
-
-SCHEMA_SQL = """
-CREATE TABLE IF NOT EXISTS products (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    site        TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    category    TEXT,
-    currency    TEXT DEFAULT 'USD',
-    url         TEXT,
-    image_url   TEXT,
-    first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
-    last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
-    UNIQUE(site, name)
-);
-
-CREATE TABLE IF NOT EXISTS price_history (
-    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    product_id  INTEGER NOT NULL REFERENCES products(id),
-    price       REAL,
-    price_text  TEXT,
-    currency    TEXT DEFAULT 'USD',
-    scraped_at  TEXT NOT NULL,
-    source_url  TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_history_product
-    ON price_history(product_id, scraped_at DESC);
-
-CREATE INDEX IF NOT EXISTS idx_products_site
-    ON products(site, category);
-
-CREATE TABLE IF NOT EXISTS scrape_runs (
-    id                INTEGER PRIMARY KEY AUTOINCREMENT,
-    started_at        TEXT NOT NULL DEFAULT (datetime('now')),
-    finished_at       TEXT,
-    status            TEXT NOT NULL DEFAULT 'running',
-    trigger           TEXT NOT NULL DEFAULT 'manual',
-    http_only         INTEGER NOT NULL DEFAULT 0,
-    products_scraped  INTEGER,
-    error             TEXT
-);
-
-CREATE INDEX IF NOT EXISTS idx_scrape_runs_started
-    ON scrape_runs(started_at DESC);
-"""
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from db import connect, init_schema, DB_PATH
+from ingest import ingest_file
 
 
-# ── DB helpers ────────────────────────────────────────────────────────────
+# ── Schema / ingest ───────────────────────────────────────────────────────
+# Both now live in the shared modules so the scraper, the matcher and the
+# dashboard all use one implementation. This file is the query/CLI surface.
 
 def get_db():
-    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(str(DB_PATH))
-    conn.row_factory = sqlite3.Row
-    conn.execute("PRAGMA journal_mode=WAL")
-    conn.execute("PRAGMA foreign_keys=ON")
-    return conn
-
-
-def _migrate_schema(conn):
-    """Add columns to pre-existing DBs that predate them (CREATE TABLE IF NOT
-    EXISTS in SCHEMA_SQL only helps brand-new databases)."""
-    cols = {row['name'] for row in conn.execute("PRAGMA table_info(products)")}
-    if 'image_url' not in cols:
-        conn.execute("ALTER TABLE products ADD COLUMN image_url TEXT")
+    """Legacy helper: a raw sqlite3 connection for the CLI reporting queries."""
+    return connect().conn
 
 
 def init_db():
-    conn = get_db()
-    conn.executescript(SCHEMA_SQL)
-    _migrate_schema(conn)
-    conn.commit()
-    conn.close()
+    with connect() as db:
+        init_schema(db)
     print(f'Database initialized: {DB_PATH}')
 
 
-# ── Ingest ────────────────────────────────────────────────────────────────
-
 def ingest_scrape(json_path):
-    with open(json_path) as f:
-        raw_products = json.load(f)
-
-    # Deduplicate by (site, name), keeping first occurrence (most specific category)
-    seen = set()
-    products = []
-    for p in raw_products:
-        key = (p.get('site', ''), p.get('name', ''))
-        if key not in seen:
-            seen.add(key)
-            products.append(p)
-
-    scraped_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    conn = get_db()
-    _migrate_schema(conn)
-
-    inserted = 0
-    updated = 0
-    history = 0
-
-    for p in products:
-        site = p.get('site', 'Unknown')
-        name = p.get('name', 'Unknown')
-        category = p.get('category')
-        currency = p.get('currency', 'USD')
-        url = p.get('url', '')
-        image_url = p.get('image_url', '')
-        price = p.get('price')
-        price_text = p.get('price_text')
-        source_url = p.get('source_url', '')
-
-        if not name or name == 'Unknown':
-            continue
-
-        # Upsert into products
-        cur = conn.execute("""
-            INSERT INTO products (site, name, category, currency, url, image_url)
-            VALUES (?, ?, ?, ?, ?, ?)
-            ON CONFLICT(site, name) DO UPDATE SET
-                category  = COALESCE(NULLIF(?, ''), category),
-                url       = COALESCE(NULLIF(?, ''), url),
-                image_url = COALESCE(NULLIF(?, ''), image_url),
-                last_seen = datetime('now')
-        """, (site, name, category, currency, url, image_url, category, url, image_url))
-
-        if cur.rowcount == 0:
-            updated += 1
-        else:
-            # Check if it was an update or insert
-            if cur.lastrowid:
-                inserted += 1
-            else:
-                updated += 1
-
-        # Get product ID
-        row = conn.execute(
-            "SELECT id FROM products WHERE site = ? AND name = ?",
-            (site, name)
-        ).fetchone()
-        if not row:
-            continue
-        pid = row['id']
-
-        # Append to price_history (only if price is meaningful)
-        if price is not None:
-            try:
-                price_float = float(price)
-                if price_float > 0:
-                    conn.execute("""
-                        INSERT INTO price_history (product_id, price, price_text, currency, scraped_at, source_url)
-                        VALUES (?, ?, ?, ?, ?, ?)
-                    """, (pid, price_float, price_text, currency, scraped_at, source_url))
-                    history += 1
-            except (ValueError, TypeError):
-                pass
-
-    conn.commit()
-    conn.close()
-
-    print(f'Ingested {len(products)} products from {json_path}')
-    print(f'  Products: {inserted} new, {updated} existing')
-    print(f'  Price records: {history}')
+    """Ingest a scrape JSON file into the configured database."""
+    return ingest_file(json_path)
 
 
 # ── Queries ───────────────────────────────────────────────────────────────

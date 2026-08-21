@@ -7,3 +7,4 @@ data/
 .equipment_dashboard_auth
 .equipment_dashboard_resets
 __pycache__
+.equipment_dashboard_secret

@@ -1,24 +1,30 @@
 #!/usr/bin/env python3
 """
-Scrape orchestrator: runs all equipment sites, saves JSON, ingests into DB,
-and pushes to Neon if DATABASE_URL is set.
+Scrape orchestrator: runs all equipment sites, saves JSON, and ingests the
+results into whichever database is configured (Neon when DATABASE_URL is set,
+SQLite otherwise).
 
 Usage:
     python scraper/run_scrape.py              # Full scrape (HTTP + browser)
     python scraper/run_scrape.py --http-only   # HTTP stores only
     python scraper/run_scrape.py --site rogue  # Single site
 """
-import sys, os, json, time, argparse
+import sys, os, json, time, argparse, threading
 from pathlib import Path
 from datetime import datetime, timezone
 
 # Add scraper directory to path for imports
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from equipment_scraper import scrape_all, to_json, to_csv
+from equipment_scraper import scrape_all, to_json
+from db import connect, init_schema
+from ingest import ingest
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / 'data'
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+HEARTBEAT_SECONDS = 30
+KEEP_SCRAPE_FILES = int(os.environ.get('KEEP_SCRAPE_FILES', '14'))
 
 
 def _now_str():
@@ -27,29 +33,42 @@ def _now_str():
 
 def _update_run(run_id, **fields):
     """Update a scrape_runs row (dashboard.py inserts it before launching this
-    process). Writes to whichever backend the dashboard reads from, so scrape
-    status/history is visible there."""
-    if run_id is None:
+    process) so scrape status/history is visible in the UI."""
+    if run_id is None or not fields:
         return
-    db_url = os.environ.get('DATABASE_URL', '')
-    set_clause = ', '.join(f'{k} = %s' for k in fields) if db_url else \
-                 ', '.join(f'{k} = ?' for k in fields)
+    assignments = ', '.join(f'{k} = ?' for k in fields)
     params = list(fields.values()) + [run_id]
     try:
-        if db_url:
-            import psycopg2
-            conn = psycopg2.connect(db_url)
-            conn.cursor().execute(f'UPDATE scrape_runs SET {set_clause} WHERE id = %s', params)
-            conn.commit()
-            conn.close()
-        else:
-            from equipment_db import get_db
-            conn = get_db()
-            conn.execute(f'UPDATE scrape_runs SET {set_clause} WHERE id = ?', params)
-            conn.commit()
-            conn.close()
+        with connect() as db:
+            db.execute(f'UPDATE scrape_runs SET {assignments} WHERE id = ?', params)
     except Exception as e:
         print(f'scrape_runs update error: {e}', flush=True)
+
+
+def _start_heartbeat(run_id):
+    """Touch heartbeat_at periodically so the dashboard can tell a live scrape
+    from one whose process was killed (Replit recycles containers mid-run)."""
+    if run_id is None:
+        return lambda: None
+    stop = threading.Event()
+
+    def beat():
+        while not stop.wait(HEARTBEAT_SECONDS):
+            _update_run(run_id, heartbeat_at=_now_str())
+
+    t = threading.Thread(target=beat, daemon=True)
+    t.start()
+    return stop.set
+
+
+def _prune_old_scrapes():
+    """Keep the last N dated scrape files; they are ~3 MB each."""
+    files = sorted(OUTPUT_DIR.glob('scrape_20*.json'))
+    for old in files[:-KEEP_SCRAPE_FILES] if len(files) > KEEP_SCRAPE_FILES else []:
+        try:
+            old.unlink()
+        except OSError:
+            pass
 
 
 def main():
@@ -58,171 +77,90 @@ def main():
     parser.add_argument('--site', '-s', help='Scrape a single site')
     parser.add_argument('--output', '-o', help='Output JSON path')
     parser.add_argument('--run-id', type=int, help='scrape_runs row to update with progress/result')
+    # Shopify's rate limit is per IP across all storefronts, so more workers
+    # means more 429s, not more throughput. 3 plus http_get's per-host spacing
+    # completes a full run without tripping it.
+    parser.add_argument('--workers', type=int,
+                        default=int(os.environ.get('SCRAPE_WORKERS', '3')),
+                        help='Parallel site workers (default 3)')
     args = parser.parse_args()
 
     date_str = datetime.now(timezone.utc).strftime('%Y-%m-%d_%H%M')
     print(f'Scrape starting at {date_str}', flush=True)
+    stop_heartbeat = _start_heartbeat(args.run_id)
+    _update_run(args.run_id, heartbeat_at=_now_str())
 
     try:
-        # Check if browser scraping is available
         has_browser = False
         if not args.http_only:
             try:
-                import playwright
+                import playwright  # noqa: F401
                 has_browser = True
             except ImportError:
                 print('Playwright not available, skipping browser sites', flush=True)
 
-        if args.site:
-            results, products = scrape_all(site_filter=args.site, use_browser=has_browser)
-        else:
-            results, products = scrape_all(use_browser=has_browser)
+        results, products = scrape_all(site_filter=args.site, use_browser=has_browser,
+                                       workers=args.workers)
+
+        # Surface partial failures rather than silently shipping a thin scrape.
+        failed = [r for r in results if r.get('status') == 'error']
+        blocked = [r for r in results if r.get('status') == 'blocked']
+        empty = [r for r in results
+                 if r.get('status') in ('ok', 'empty') and not r.get('products')]
+        for r in failed:
+            print(f"  !! {r['site']} failed: {r.get('error')}", flush=True)
+        for r in blocked:
+            print(f"  !! {r['site']} was rate-limited/blocked: {r.get('error')}", flush=True)
+        for r in empty:
+            print(f"  !! {r['site']} returned 0 products", flush=True)
 
         if not products:
-            print('No products scraped', flush=True)
             _update_run(args.run_id, status='error', error='No products scraped',
                         finished_at=_now_str())
-            return
+            return 1
 
-        # Save JSON
-        output_path = args.output or (OUTPUT_DIR / f'scrape_{date_str}.json')
-        output_path = Path(output_path)
-        output_path.write_text(to_json(products))
+        output_path = Path(args.output or (OUTPUT_DIR / f'scrape_{date_str}.json'))
+        payload = to_json(products)
+        output_path.write_text(payload)
+        # Only a full run may claim to be "latest" — a --site run holds one
+        # store's products and would otherwise masquerade as a complete scrape.
+        if not args.site:
+            (OUTPUT_DIR / 'scrape_latest.json').write_text(payload)
         print(f'{len(products)} products -> {output_path}', flush=True)
+        _prune_old_scrapes()
 
-        # Also save latest
-        latest = OUTPUT_DIR / 'scrape_latest.json'
-        latest.write_text(to_json(products))
+        # Single ingest path — same code for SQLite and Neon.
+        with connect() as db:
+            init_schema(db)
+            stats = ingest(products, db=db)
 
-        # Ingest into local SQLite
-        try:
-            from equipment_db import init_db, ingest_scrape
-            init_db()
-            print('Ingesting into local SQLite...', flush=True)
-            ingest_scrape(str(latest))
-        except Exception as e:
-            print(f'Local DB ingest error: {e}', flush=True)
-
-        # Push to Neon if DATABASE_URL set
-        db_url = os.environ.get('DATABASE_URL', '')
-        if db_url:
-            try:
-                push_to_neon(products, db_url)
-            except Exception as e:
-                print(f'Neon push error: {e}', flush=True)
-
-        # Run product matching
         try:
             from product_matching import compute_matches
             print('Running product matching...', flush=True)
-            compute_matches(threshold=65)
+            compute_matches()
         except ImportError as e:
             print(f'Product matching skipped (rapidfuzz not installed?): {e}', flush=True)
         except Exception as e:
             print(f'Product matching error: {e}', flush=True)
 
+        note = None
+        broken = [r['site'] for r in failed + blocked + empty]
+        if broken:
+            note = f"{len(broken)} store(s) returned nothing: {', '.join(broken[:8])}"
+            if len(broken) > 8:
+                note += f' (+{len(broken) - 8} more)'
         print('Done', flush=True)
-        _update_run(args.run_id, status='success', products_scraped=len(products),
-                    finished_at=_now_str())
+        _update_run(args.run_id, status='success', products_scraped=stats['products'],
+                    error=note, finished_at=_now_str())
+        return 0
     except Exception as e:
         print(f'Scrape failed: {e}', flush=True)
         _update_run(args.run_id, status='error', error=str(e)[:500],
                     finished_at=_now_str())
         raise
-
-
-def push_to_neon(products, db_url):
-    """Push scrape results to Neon PostgreSQL."""
-    import psycopg2
-    from psycopg2.extras import execute_values
-
-    conn = psycopg2.connect(db_url)
-    cur = conn.cursor()
-
-    # Ensure tables exist
-    cur.execute("""
-        CREATE TABLE IF NOT EXISTS products (
-            id          SERIAL PRIMARY KEY,
-            site        TEXT NOT NULL,
-            name        TEXT NOT NULL,
-            category    TEXT,
-            currency    TEXT DEFAULT 'USD',
-            url         TEXT,
-            first_seen  TIMESTAMP NOT NULL DEFAULT NOW(),
-            last_seen   TIMESTAMP NOT NULL DEFAULT NOW(),
-            UNIQUE(site, name)
-        );
-        CREATE TABLE IF NOT EXISTS price_history (
-            id          SERIAL PRIMARY KEY,
-            product_id  INTEGER NOT NULL REFERENCES products(id),
-            price       REAL,
-            price_text  TEXT,
-            currency    TEXT DEFAULT 'USD',
-            scraped_at  TIMESTAMP NOT NULL,
-            source_url  TEXT
-        );
-        CREATE INDEX IF NOT EXISTS idx_ph_product ON price_history(product_id, scraped_at DESC);
-        CREATE INDEX IF NOT EXISTS idx_p_site ON products(site, category);
-        ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
-    """)
-    conn.commit()
-
-    scraped_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-    inserted = 0
-    history = 0
-
-    for p in products:
-        site = p.get('site', 'Unknown')
-        name = p.get('name', 'Unknown')
-        category = p.get('category')
-        currency = p.get('currency', 'USD')
-        url = p.get('url', '')
-        image_url = p.get('image_url', '')
-        price = p.get('price')
-        price_text = p.get('price_text')
-        source_url = p.get('source_url', '')
-
-        if not name or not price:
-            continue
-
-        # Upsert product
-        cur.execute("""
-            INSERT INTO products (site, name, category, currency, url, image_url)
-            VALUES (%s, %s, %s, %s, %s, %s)
-            ON CONFLICT (site, name) DO UPDATE SET
-                category  = COALESCE(NULLIF(%s, ''), products.category),
-                url       = COALESCE(NULLIF(%s, ''), products.url),
-                image_url = COALESCE(NULLIF(%s, ''), products.image_url),
-                last_seen = NOW()
-        """, (site, name, category, currency, url, image_url, category, url, image_url))
-
-        if cur.rowcount == 0 or cur.rowcount == 1:
-            inserted += 1
-
-        # Get product ID
-        cur.execute("SELECT id FROM products WHERE site = %s AND name = %s", (site, name))
-        row = cur.fetchone()
-        if not row:
-            continue
-        pid = row[0]
-
-        # Insert price history
-        try:
-            price_float = float(price)
-            if price_float > 0:
-                cur.execute("""
-                    INSERT INTO price_history (product_id, price, price_text, currency, scraped_at, source_url)
-                    VALUES (%s, %s, %s, %s, %s, %s)
-                """, (pid, price_float, price_text, currency, scraped_at, source_url))
-                history += 1
-        except (ValueError, TypeError):
-            pass
-
-    conn.commit()
-    cur.close()
-    conn.close()
-    print(f'Pushed to Neon: {inserted} products, {history} price records', flush=True)
+    finally:
+        stop_heartbeat()
 
 
 if __name__ == '__main__':
-    main()
+    sys.exit(main() or 0)

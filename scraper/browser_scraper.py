@@ -13,76 +13,127 @@ extract_shopify_collection_json().
 """
 
 import json
+import os
+import shutil
 import time
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
 
+def chromium_executable():
+    """Locate a usable Chromium.
+
+    Playwright defaults to a browser it downloads into PLAYWRIGHT_BROWSERS_PATH,
+    which on Replit points at an ephemeral cache that is routinely empty — the
+    symptom is ``Executable doesn't exist at .../chromium_headless_shell-.../``
+    and a silent zero-product scrape for every browser site. Replit publishes a
+    working build via REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE, and a nix chromium
+    is usually on PATH, so prefer those and fall back to Playwright's bundled
+    download only if neither is present.
+    """
+    candidates = [
+        os.environ.get('PLAYWRIGHT_CHROMIUM_EXECUTABLE'),
+        os.environ.get('REPLIT_PLAYWRIGHT_CHROMIUM_EXECUTABLE'),
+        shutil.which('chromium'),
+        shutil.which('chromium-browser'),
+        shutil.which('google-chrome'),
+    ]
+    for path in candidates:
+        if path and os.path.exists(path):
+            return path
+    return None
+
+
 # ── Rogue (Vue SPA, DOM extraction) ───────────────────────────────────────
 
+# Verified live. The previous 'Plates' and 'Racks & Rigs' URLs had started
+# 404ing after a Rogue site reorganisation, silently contributing zero products.
 ROGUE_CATEGORIES = {
     'Barbells': 'https://www.roguefitness.com/weightlifting-bars-plates/barbells',
-    'Plates': 'https://www.roguefitness.com/weightlifting-bars-plates/barbell-plates',
-    'Racks & Rigs': 'https://www.roguefitness.com/strength-training/racks-rigs',
+    'Plates': 'https://www.roguefitness.com/weightlifting-bars-plates/bumpers/bumper-plates',
+    'Competition Plates': 'https://www.roguefitness.com/weightlifting-bars-plates/bumpers/competition-bumpers',
+    'Steel Plates': 'https://www.roguefitness.com/weightlifting-bars-plates/bumpers/steel-plates',
+    'Racks': 'https://www.roguefitness.com/rogue-rigs-racks/power-racks',
+    'Collars': 'https://www.roguefitness.com/weightlifting-bars-plates/collars',
 }
 
 
+# The category grid. `a.product` looked right but is the "popular products"
+# carousel — it returned the same 12 items (Echo Bike, kettlebells…) on every
+# category page. The real tiles are hover-cards inside .products-wrapper.
+GRID_SELECTOR = '.products-wrapper a.hover-card'
+JSON_GRID_SELECTOR = repr(GRID_SELECTOR)
+
+
+def _autoscroll(page, max_steps=12):
+    """Rogue lazy-loads its grid on scroll; step down until the count settles."""
+    previous = -1
+    for _ in range(max_steps):
+        count = page.evaluate(
+            "() => document.querySelectorAll(%s).length" % JSON_GRID_SELECTOR)
+        if count == previous:
+            break
+        previous = count
+        page.mouse.wheel(0, 4000)
+        page.wait_for_timeout(600)
+    return previous
+
+
 def extract_products_from_page(page):
-    """Extract all products visible on the current Rogue page."""
-    data = page.evaluate("""() => {
-        const links = Array.from(document.querySelectorAll('a[href*="/rogue-"]'));
+    """Extract the products in the category grid.
+
+    Scoped to GRID_SELECTOR — the category grid's own tiles. The original
+    selector (`a[href*="/rogue-"]`) matched every Rogue link on the page, so it
+    swept up nav entries and carousels: on the Barbells page that turned 70 real
+    barbells into 105 rows including kettlebells, shirts and an Echo Bike, all
+    labelled "Barbells", plus ~40 price-less nav links.
+    """
+    return page.evaluate(r"""(GRID) => {
+        const cards = Array.from(document.querySelectorAll(GRID));
         const seen = new Map();
 
-        links.forEach(a => {
-            const name = (a.textContent || a.innerText || '').trim();
-            if (!name || name.length < 5) return;
-            if (name.includes('Gym Tour') || name.includes('Equipped')) return;
+        cards.forEach(a => {
+            const priceEl = a.querySelector('[class*="price"], [class*="amount"]');
+            const rawText = (a.textContent || '').trim();
+            const priceSource = priceEl ? priceEl.textContent : rawText;
+            const priceMatch = (priceSource || '').match(/\$[\d,]+(?:\.\d{2})?/);
+            if (!priceMatch) return;                       // nav/junk link
+            const priceText = priceMatch[0];
+            const price = parseFloat(priceText.replace(/[$,]/g, ''));
+            if (!price || price <= 0) return;
 
-            if (!seen.has(name)) {
-                const card = a.closest('[class*="product"], [class*="item"], li, div') || a.parentElement;
+            // The card's text is "Name$123.00" — strip the price and any rating.
+            let name = rawText
+                .replace(/\$[\d,]+(?:\.\d{2})?[\s\S]*$/, '')
+                .replace(/[★☆]+.*$/, '')
+                .replace(/\s+/g, ' ')
+                .trim();
+            if (!name || name.length < 3) return;
 
-                // Find price - look for spans/divs with price classes or $ signs
-                let price = '';
-                const priceEl = card ? card.querySelector(
-                    '[class*="price"], [class*="amount"], [class*="sale"]'
-                ) : null;
-                if (priceEl) {
-                    price = (priceEl.textContent || priceEl.innerText || '').trim();
-                }
+            const url = a.href || '';
+            if (!url || seen.has(url)) return;
 
-                // Extract numeric price - clean up any trailing junk
-                const priceMatch = (price || name).match(/\\$[\\d,]+(?:\\.\\d+)?/);
-                const cleanPrice = priceMatch ? priceMatch[0] : '';
-                // Extract numeric value
-                const priceNum = cleanPrice ? parseFloat(cleanPrice.replace(/[$,]/g, '')) : null;
-                // Clean up name - remove trailing price and ratings
-                let cleanName = name.replace(/\\$[\\d,.]+/, '').replace(/[★☆]+.*$/, '').trim();
-
-                // Find an image within the card — prefer loaded src, fall back
-                // to common lazy-load attributes.
-                let imageUrl = null;
-                const imgEl = card ? card.querySelector('img') : null;
-                if (imgEl) {
-                    imageUrl = imgEl.currentSrc || imgEl.src || imgEl.getAttribute('data-src')
-                        || imgEl.getAttribute('data-srcset') || null;
-                    if (imageUrl && imageUrl.startsWith('data:')) imageUrl = null;
-                    if (imageUrl && imageUrl.startsWith('//')) imageUrl = 'https:' + imageUrl;
-                }
-
-                seen.set(cleanName, {
-                    name: cleanName,
-                    price: priceNum,
-                    price_text: cleanPrice,
-                    url: a.href || '',
-                    image_url: imageUrl,
-                });
+            let imageUrl = null;
+            const imgEl = a.querySelector('img');
+            if (imgEl) {
+                imageUrl = imgEl.currentSrc || imgEl.src
+                    || imgEl.getAttribute('data-src') || null;
+                if (imageUrl && imageUrl.startsWith('data:')) imageUrl = null;
+                if (imageUrl && imageUrl.startsWith('//')) imageUrl = 'https:' + imageUrl;
             }
+
+            seen.set(url, {
+                name: name,
+                price: price,
+                price_text: priceText,
+                url: url,
+                image_url: imageUrl,
+            });
         });
 
         return Array.from(seen.values());
-    }""")
-    return data
+    }""", GRID_SELECTOR)
 
 
 # ── Site configs ──────────────────────────────────────────────────────────
@@ -101,8 +152,14 @@ def scrape_site_playwright(site_key, config, headless=True):
     all_products = []
     start_time = time.time()
 
+    executable = chromium_executable()
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=headless)
+        launch_kwargs = {'headless': headless}
+        if executable:
+            launch_kwargs['executable_path'] = executable
+        else:
+            print('  (no system chromium found — using Playwright bundled build)', flush=True)
+        browser = p.chromium.launch(**launch_kwargs)
         context = browser.new_context(
             user_agent=('Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 '
                         '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
@@ -113,8 +170,14 @@ def scrape_site_playwright(site_key, config, headless=True):
         for cat_name, url in config['categories'].items():
             try:
                 print(f'  {cat_name}...', end=' ', flush=True)
-                page.goto(url, wait_until='load', timeout=30000)
-                page.wait_for_timeout(2500)  # Let JS hydrate
+                page.goto(url, wait_until='load', timeout=45000)
+                # Wait for the grid itself rather than guessing at a hydration
+                # delay — slower category pages were being read while empty.
+                try:
+                    page.wait_for_selector(GRID_SELECTOR, timeout=20000)
+                except Exception:
+                    print('(grid never appeared)', end=' ', flush=True)
+                _autoscroll(page)
 
                 items = extract_products_from_page(page)
 
@@ -124,6 +187,7 @@ def scrape_site_playwright(site_key, config, headless=True):
                     item['site'] = config['name']
                     item['category'] = cat_name
                     item['currency'] = config['currency']
+                    item['source_url'] = url
 
                 all_products.extend(items)
 
@@ -132,12 +196,13 @@ def scrape_site_playwright(site_key, config, headless=True):
 
         browser.close()
 
-    # Deduplicate by name
+    # Deduplicate by product URL — the retailer's own identity for the item.
+    # Keying on name would merge distinct variants that share a display name.
     seen = set()
     deduped = []
     for p in all_products:
-        key = (p.get('name', '').lower(), p.get('category', ''))
-        if key[0] and key not in seen:
+        key = p.get('url') or p.get('name', '').lower()
+        if key and key not in seen:
             seen.add(key)
             deduped.append(p)
 

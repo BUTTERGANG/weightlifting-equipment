@@ -1,0 +1,35 @@
+{% extends "base_auth.html" %}
+{% block title %}Plate Magnet — Reset Password{% endblock %}
+{% block content %}
+<div class="card">
+  <h1>Reset Password</h1>
+  <div class="subtitle">Enter your email and we'll send a secure reset link</div>
+  <div class="msg{% if notice %} error visible{% endif %}" id="msg">{{ notice or '' }}</div>
+  <form id="forgotForm" onsubmit="return handleForgot(event)">
+    <div class="field">
+      <label for="username">Email Address</label>
+      <input type="email" id="username" name="username" autocomplete="username" placeholder="you@example.com" required autofocus>
+    </div>
+    <button type="submit">Send Reset Link →</button>
+  </form>
+  <div class="footer"><a href="/login">← Back to sign in</a></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function handleForgot(e) {
+  e.preventDefault();
+  const msg = document.getElementById('msg');
+  hideMsg(msg);
+  try {
+    const {data} = await postForm('/forgot-password',
+      {username: document.getElementById('username').value.trim()});
+    showMsg(msg, data.message || data.error || 'If that account exists, a reset link is on its way.',
+            data.error ? 'error' : 'ok');
+  } catch (e) {
+    showMsg(msg, 'Connection error. Try again.', 'error');
+  }
+  return false;
+}
+</script>
+{% endblock %}

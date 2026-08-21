@@ -1,0 +1,50 @@
+{% extends "base_auth.html" %}
+{% block title %}Plate Magnet — Login{% endblock %}
+{% block content %}
+<div class="card">
+  <div class="brand">
+    <div class="brand-icon">⚡</div>
+    <div class="brand-name">PLATE<span>MAGNET</span></div>
+  </div>
+  <div class="subtitle">Real-time equipment intelligence &amp; deal radar</div>
+  <div class="error-box" id="errorMsg"></div>
+  <form id="loginForm" onsubmit="return handleLogin(event)">
+    <div class="field">
+      <label for="username">Email</label>
+      <input type="email" id="username" name="username" autocomplete="username" placeholder="you@example.com" required autofocus>
+    </div>
+    <div class="field">
+      <label for="password">Password</label>
+      <input type="password" id="password" name="password" autocomplete="current-password" placeholder="••••••••" required>
+    </div>
+    <button type="submit">Sign In →</button>
+  </form>
+  <div class="footer-text"><a href="/forgot-password">Forgot your password?</a></div>
+</div>
+{% endblock %}
+{% block scripts %}
+<script>
+async function handleLogin(e) {
+  e.preventDefault();
+  const err = document.getElementById('errorMsg');
+  const u = document.getElementById('username').value.trim();
+  const p = document.getElementById('password').value;
+  err.className = 'error-box';
+  if (!u || !p) {
+    err.textContent = 'Please enter email and password';
+    err.className = 'error-box visible';
+    return false;
+  }
+  try {
+    const {ok, data} = await postForm('/login', {username: u, password: p});
+    if (ok) { window.location.href = '/'; return false; }
+    err.textContent = data.error || 'Invalid credentials';
+    err.className = 'error-box visible';
+  } catch (e) {
+    err.textContent = 'Connection error. Please try again.';
+    err.className = 'error-box visible';
+  }
+  return false;
+}
+</script>
+{% endblock %}

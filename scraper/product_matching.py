@@ -14,10 +14,11 @@ Usage:
 import os
 import re
 import sys
-import sqlite3
 import argparse
-from pathlib import Path
+from collections import defaultdict
 from datetime import datetime
+
+from db import connect, init_schema
 
 try:
     from rapidfuzz import fuzz
@@ -25,8 +26,20 @@ except ImportError:
     print("rapidfuzz not installed. Run: pip install rapidfuzz")
     sys.exit(1)
 
-DB_PATH = Path.home() / 'equipment_data' / 'equipment.db'
-DATABASE_URL = os.environ.get('DATABASE_URL', '')
+# Similarity floor for calling two cross-store products "the same thing".
+# 65 was far too loose: on 6.8k products it produced 13k pairs (~2 per product),
+# dominated by generic apparel whose normalised names collapse to one or two
+# words. 82 plus the guards in _is_plausible_match keeps the pairs that a human
+# would actually accept as the same item.
+DEFAULT_THRESHOLD = 82
+
+# Category labels that are store-shelf groupings, not product types. Matching
+# within them compares unrelated items, so they're skipped.
+GENERIC_CATEGORIES = {
+    'all', 'all items', 'new', 'clearance', 'sale', 'gear', 'equipment',
+    'accessories', 'apparel', 'uncategorized', 'featured', 'best sellers',
+    'shop all', 'gift cards',
+}
 
 # ── Normalization ─────────────────────────────────────────────────────────
 
@@ -105,243 +118,164 @@ def test_normalize():
 
 # ── Database helpers ──────────────────────────────────────────────────────
 
-def get_db():
-    if DATABASE_URL:
-        import psycopg2
-        conn = psycopg2.connect(DATABASE_URL)
-        conn.autocommit = False
-        return conn, 'postgres'
-    else:
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        return conn, 'sqlite'
+def _norm_tokens(name):
+    return {t for t in re.split(r'[^a-z0-9"\']+', name) if len(t) > 1}
 
 
-def ensure_matches_table(db, db_type):
-    cur = db.cursor()
-    if db_type == 'postgres':
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS product_matches (
-                product_id         INTEGER NOT NULL REFERENCES products(id),
-                matched_product_id INTEGER NOT NULL REFERENCES products(id),
-                similarity         REAL NOT NULL,
-                updated_at         TIMESTAMP NOT NULL DEFAULT NOW(),
-                PRIMARY KEY (product_id, matched_product_id)
-            );
-        """)
-    else:
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS product_matches (
-                product_id         INTEGER NOT NULL,
-                matched_product_id INTEGER NOT NULL,
-                similarity         REAL NOT NULL,
-                updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
-                PRIMARY KEY (product_id, matched_product_id),
-                FOREIGN KEY (product_id) REFERENCES products(id),
-                FOREIGN KEY (matched_product_id) REFERENCES products(id)
-            );
-        """)
-    db.commit()
+def _is_plausible_match(n1, n2, sim):
+    """Guard rails on top of the raw fuzzy score.
 
-
-def clear_matches(db, db_type):
-    cur = db.cursor()
-    cur.execute("DELETE FROM product_matches")
-    db.commit()
+    A high token_sort_ratio between two very short normalised names is close to
+    meaningless — "shorts" vs "short" scores 91 but says nothing. Require enough
+    substance, and require the two names to actually share a distinctive token.
+    """
+    if len(n1) < 8 or len(n2) < 8:
+        return False
+    t1, t2 = _norm_tokens(n1), _norm_tokens(n2)
+    if len(t1) < 2 or len(t2) < 2:
+        return False
+    shared = t1 & t2
+    if not shared:
+        return False
+    # At least one shared token has to be more specific than "bar"/"set".
+    if not any(len(t) >= 4 for t in shared):
+        return False
+    return sim >= DEFAULT_THRESHOLD or sim >= 90
 
 
 # ── Matching engine ──────────────────────────────────────────────────────
 
-def compute_matches(threshold=65, batch_size=1000):
-    """Compute and store product matches within same categories."""
-    print(f"Product matching v1.0 (rapidfuzz)")
-    print(f"Threshold: {threshold}%")
-    print(f"Database: {'Neon PostgreSQL' if DATABASE_URL else f'SQLite ({DB_PATH})'}")
-    print()
+def compute_matches(threshold=None, batch_size=1000):
+    """Recompute cross-store product matches. Returns a stats dict."""
+    threshold = DEFAULT_THRESHOLD if threshold is None else threshold
+    print('Product matching v2 (rapidfuzz)')
+    print(f'Threshold: {threshold}%')
 
-    db, db_type = get_db()
-    ensure_matches_table(db, db_type)
-    clear_matches(db, db_type)
-    cur = db.cursor()
-
-    # Fetch all products grouped by category
-    if db_type == 'postgres':
-        cur.execute("""
-            SELECT id, site, name, COALESCE(category, 'Uncategorized') as category
-            FROM products ORDER BY category, site, name
+    db = connect()
+    try:
+        init_schema(db)
+        products = db.query("""
+            SELECT id, site, name, COALESCE(category, 'Uncategorized') AS category
+            FROM products
         """)
-    else:
-        cur.execute("""
-            SELECT id, site, name, COALESCE(category, 'Uncategorized') as category
-            FROM products ORDER BY category, site, name
-        """)
+        print(f'Loaded {len(products)} products')
 
-    products = cur.fetchall()
-    total = len(products)
-    print(f"Loaded {total} products")
+        by_category = defaultdict(list)
+        skipped_categories = 0
+        for p in products:
+            cat = p['category']
+            if cat.strip().lower() in GENERIC_CATEGORIES:
+                skipped_categories += 1
+                continue
+            norm = normalize_name(p['name'])
+            if not norm:
+                continue
+            by_category[cat].append((p['id'], p['site'], norm))
 
-    # Group by category
-    from collections import defaultdict
-    by_category = defaultdict(list)
-    for p in products:
-        cat = p['category'] if db_type == 'sqlite' else p[3]
-        by_category[cat].append(p)
+        print(f'Matching across {len(by_category)} product categories '
+              f'({skipped_categories} rows in generic categories skipped)')
 
-    print(f"Across {len(by_category)} categories\n")
-
-    # Pre-compute normalized names
-    normalized = {}
-    for p in products:
-        name = p['name'] if db_type == 'sqlite' else p[2]
-        normalized[p['id'] if db_type == 'sqlite' else p[0]] = normalize_name(name)
-
-    # Match within each category
-    total_pairs = 0
-    total_inserted = 0
-    start = datetime.now()
-
-    for cat, cat_products in sorted(by_category.items()):
-        ids = [p['id'] if db_type == 'sqlite' else p[0] for p in cat_products]
-        n = len(ids)
-        if n < 2:
-            continue
+        db.execute('DELETE FROM product_matches')
+        db.commit()
 
         pairs = []
-        for i in range(n):
-            for j in range(i + 1, n):
-                pid1, pid2 = ids[i], ids[j]
-                names = (
-                    normalized.get(pid1, ''),
-                    normalized.get(pid2, '')
-                )
-                # Skip if either normalized name is empty
-                if not names[0] or not names[1]:
-                    continue
-                # Skip same-store comparisons (we want cross-store matching)
-                site1 = cat_products[i]['site'] if db_type == 'sqlite' else cat_products[i][1]
-                site2 = cat_products[j]['site'] if db_type == 'sqlite' else cat_products[j][1]
-                if site1 == site2:
-                    continue
+        total = 0
+        start_time = datetime.now()
+        for cat, items in sorted(by_category.items()):
+            n = len(items)
+            if n < 2:
+                continue
+            for i in range(n):
+                id1, site1, n1 = items[i]
+                for j in range(i + 1, n):
+                    id2, site2, n2 = items[j]
+                    if site1 == site2:      # we only care about cross-store matches
+                        continue
+                    sim = fuzz.token_sort_ratio(n1, n2)
+                    if sim < threshold:
+                        continue
+                    if not _is_plausible_match(n1, n2, sim):
+                        continue
+                    sim = round(float(sim), 1)
+                    # Store both directions: the dashboard looks up matches with
+                    # WHERE product_id = ?, so a one-directional row made half of
+                    # every match invisible.
+                    pairs.append((id1, id2, sim))
+                    pairs.append((id2, id1, sim))
+                    total += 1
 
-                # Combine token sort + partial ratio for better results
-                sim = fuzz.token_sort_ratio(names[0], names[1])
-                if sim >= threshold:
-                    pairs.append((pid1, pid2, round(sim, 1)))
-                    total_pairs += 1
+            if len(pairs) >= batch_size:
+                _insert_batch(db, pairs)
+                pairs = []
+            elapsed = (datetime.now() - start_time).total_seconds()
+            print(f'  {cat[:42]:42s} {n:5d} products → {total:6d} matches ({elapsed:.0f}s)',
+                  flush=True)
 
-                if len(pairs) >= batch_size:
-                    total_inserted += insert_batch(db, db_type, pairs)
-                    pairs = []
-
-        if pairs:
-            total_inserted += insert_batch(db, db_type, pairs)
-
-        elapsed = (datetime.now() - start).total_seconds()
-        print(f"  {cat[:45]:45s} {n:4d} products → {total_pairs:6d} pairs found ({elapsed:.0f}s)", end='\r')
-
-    # Final insert
-    if pairs:
-        total_inserted += insert_batch(db, db_type, pairs)
-
-    elapsed = (datetime.now() - start).total_seconds()
-    print(f"\n\nDone in {elapsed:.1f}s")
-    print(f"Total: {total_inserted} cross-store matches inserted")
-
-    # Stats
-    if db_type == 'postgres':
-        cur.execute("""
-            SELECT COUNT(DISTINCT product_id) as matched_products,
-                   ROUND(AVG(similarity), 1) as avg_sim
+        _insert_batch(db, pairs)
+        elapsed = (datetime.now() - start_time).total_seconds()
+        stats = db.query_one(f"""
+            SELECT COUNT(DISTINCT product_id) AS matched_products,
+                   {db.round('AVG(similarity)', 1)} AS avg_sim
             FROM product_matches
         """)
-    else:
-        cur.execute("""
-            SELECT COUNT(DISTINCT product_id) as matched_products,
-                   ROUND(AVG(similarity), 1) as avg_sim
-            FROM product_matches
-        """)
-    stats = cur.fetchone()
-    if db_type == 'postgres':
-        print(f"Products with matches: {stats[0]}, Average similarity: {stats[1]}%")
-    else:
-        print(f"Products with matches: {stats['matched_products']}, Average similarity: {stats['avg_sim']}%")
-
-    cur.close()
-    db.close()
+        print(f'\nDone in {elapsed:.1f}s')
+        print(f'Total: {total} cross-store matches '
+              f'({stats["matched_products"]} products, '
+              f'avg similarity {stats["avg_sim"]}%)')
+        return {'matches': total, **stats}
+    finally:
+        db.close()
 
 
-def insert_batch(db, db_type, pairs):
-    """Insert a batch of match pairs."""
-    cur = db.cursor()
-    now = datetime.now().strftime('%Y-%m-%dT%H:%M:%SZ') if db_type == 'sqlite' else None
-
-    if db_type == 'postgres':
+def _insert_batch(db, pairs, commit=True):
+    """Insert a batch of (product_id, matched_product_id, similarity) rows."""
+    if not pairs:
+        return 0
+    if db.is_postgres:
         from psycopg2.extras import execute_values
-        execute_values(cur, """
+        execute_values(db.conn.cursor(), """
             INSERT INTO product_matches (product_id, matched_product_id, similarity)
             VALUES %s
             ON CONFLICT (product_id, matched_product_id) DO UPDATE SET
                 similarity = EXCLUDED.similarity,
                 updated_at = NOW()
-        """, [(p1, p2, s) for p1, p2, s in pairs])
+        """, pairs)
     else:
-        cur.executemany("""
-            INSERT OR REPLACE INTO product_matches (product_id, matched_product_id, similarity, updated_at)
-            VALUES (?, ?, ?, ?)
-        """, [(p1, p2, s, now) for p1, p2, s in pairs])
-
-    db.commit()
+        db.executemany("""
+            INSERT INTO product_matches (product_id, matched_product_id, similarity, updated_at)
+            VALUES (?, ?, ?, datetime('now'))
+            ON CONFLICT (product_id, matched_product_id) DO UPDATE SET
+                similarity = excluded.similarity,
+                updated_at = excluded.updated_at
+        """, pairs)
+    if commit:
+        db.commit()
     return len(pairs)
 
 
 def get_matches_for_product(pid, limit=5):
-    """Get top matches for a specific product."""
-    db, db_type = get_db()
-    cur = db.cursor()
-
-    if db_type == 'postgres':
-        cur.execute("""
+    """Top cross-store matches for one product."""
+    with connect() as db:
+        return db.query("""
             SELECT p.id, p.site, p.name, p.category, p.url,
-                   ph.price, ph.price_text,
-                   pm.similarity
+                   ph.price, ph.price_text, pm.similarity
             FROM product_matches pm
             JOIN products p ON p.id = pm.matched_product_id
             LEFT JOIN price_history ph ON ph.product_id = p.id
-                AND ph.scraped_at = (SELECT MAX(scraped_at) FROM price_history WHERE product_id = p.id)
-            WHERE pm.product_id = %s
-            ORDER BY pm.similarity DESC
-            LIMIT %s
-        """, (pid, limit))
-    else:
-        cur.execute("""
-            SELECT p.id, p.site, p.name, p.category, p.url,
-                   ph.price, ph.price_text,
-                   pm.similarity
-            FROM product_matches pm
-            JOIN products p ON p.id = pm.matched_product_id
-            LEFT JOIN price_history ph ON ph.product_id = p.id
-                AND ph.scraped_at = (SELECT MAX(scraped_at) FROM price_history WHERE product_id = p.id)
+                AND ph.scraped_at = (
+                    SELECT MAX(scraped_at) FROM price_history WHERE product_id = p.id)
             WHERE pm.product_id = ?
             ORDER BY pm.similarity DESC
             LIMIT ?
         """, (pid, limit))
-
-    rows = cur.fetchall()
-    if db_type == 'postgres':
-        desc = cur.description
-        results = [{desc[i][0]: r[i] for i in range(len(desc))} for r in rows]
-    else:
-        results = [dict(r) for r in rows]
-    cur.close()
-    db.close()
-    return results
 
 
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def main():
     parser = argparse.ArgumentParser(description='Product matching for Plate Magnet')
-    parser.add_argument('--threshold', type=int, default=65, help='Similarity threshold % (default: 65)')
+    parser.add_argument('--threshold', type=int, default=DEFAULT_THRESHOLD,
+                        help=f'Similarity threshold %% (default: {DEFAULT_THRESHOLD})')
     parser.add_argument('--test', action='store_true', help='Run normalization tests')
     args = parser.parse_args()
 
