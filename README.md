@@ -8,7 +8,7 @@ A price tracking dashboard for weightlifting gear across 27+ retailers. Scrapes 
 - **Database:** PostgreSQL (Neon) in production, SQLite locally
 - **Scraping:** requests + BeautifulSoup for HTTP sites, Playwright for rate-limited / JS-rendered stores
 - **Frontend:** Server-rendered HTML + Chart.js
-- **Auth:** HTTP Basic Auth (SHA-256 hashed passwords)
+- **Auth:** Session login with salted password hashes (email-based accounts, self-service password reset via AgentMail)
 
 ## Repo structure
 
@@ -21,8 +21,10 @@ weightlifting-equipment/
 │   ├── equipment_db.py        # SQLite DB layer (ingest, query, export)
 │   └── run_scrape.py          # Orchestrator: scrape → save → ingest → push to Neon
 ├── migrate_to_neon.py    # One-time SQLite → PostgreSQL migration
+├── tests/                # pytest suite (auth, reset, rate limiting)
 ├── .replit               # Replit config
 ├── requirements.txt
+├── requirements-dev.txt  # + pytest
 ├── AGENTS.md
 └── README.md
 ```
@@ -32,7 +34,15 @@ weightlifting-equipment/
 ```bash
 pip install -r requirements.txt
 python scraper/run_scrape.py --http-only          # Scrape 18 HTTP stores
+python dashboard.py --setup-auth                    # Create the first user (email + password)
 python dashboard.py                                 # Start UI at http://127.0.0.1:8080
+```
+
+## Tests
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
 ```
 
 ## Replit
@@ -48,16 +58,23 @@ python dashboard.py                                 # Start UI at http://127.0.0
 |---|---|---|
 | `DATABASE_URL` | On Replit | Neon PostgreSQL connection string. Omit for local SQLite. |
 | `PORT` | No | Server port (default 8080). On Replit set via `.replit` ports. |
+| `DASHBOARD_SECRET` | No | Flask session secret. Falls back to a hash of the auth file. |
+| `AGENTMAIL_API_KEY` | No | Enables password-reset emails. Without it, reset links are logged to stdout instead. |
+| `AGENTMAIL_INBOX_ID` | No | Pin the AgentMail inbox to send from; otherwise one is auto-created. |
 
 ## Auth
 
-User credentials stored in `~/.equipment_dashboard_auth`:
+Usernames must be email addresses. Credentials are stored in `~/.equipment_dashboard_auth`
+as `email:hash` (permissions 600), with passwords salted via werkzeug's `generate_password_hash`.
+There's no default account — the app won't start until at least one user exists.
 
 ```bash
-python dashboard.py --setup-auth     # Interactive setup
+python dashboard.py --setup-auth     # Interactive setup; re-run to add more users
 ```
 
-Passwords are SHA-256 hashed. Add multiple users by re-running `--setup-auth`.
+Forgot your password? Use the "Forgot password?" link on the login page — it emails a
+30-minute single-use reset link via AgentMail (or logs it to stdout if no API key is set).
+`/login` and `/forgot-password` are rate-limited per IP to blunt brute-force and spam.
 
 ## Deployment notes (from AGENT-PLAYBOOK lessons)
 

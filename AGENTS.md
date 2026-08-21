@@ -34,8 +34,10 @@ weightlifting-equipment/
 │   ├── equipment_db.py       # SQLite DB + CLI tools
 │   └── run_scrape.py         # Orchestrator
 ├── migrate_to_neon.py        # One-time SQLite → PostgreSQL migration
+├── tests/                    # pytest suite (auth, reset, rate limiting)
 ├── .replit                   # Replit platform config
 ├── requirements.txt
+├── requirements-dev.txt      # + pytest, for running tests/
 ├── AGENTS.md
 └── README.md
 ```
@@ -59,6 +61,10 @@ python scraper/equipment_db.py summary
 python scraper/equipment_db.py cheapest barbells
 python scraper/equipment_db.py history "Ohio Bar"
 python scraper/equipment_db.py drops 10
+
+# Tests
+pip install -r requirements-dev.txt
+python -m pytest tests/ -q
 ```
 
 ## Replit deployment
@@ -76,16 +82,31 @@ On every deploy the build step installs deps + Chromium for Playwright.
 |---|---|---|
 | `DATABASE_URL` | Replit only | Neon PostgreSQL. Omit for local SQLite. |
 | `PORT` | No | Default 8080 — .replit maps 80→8080 |
+| `DASHBOARD_SECRET` | No | Flask session secret key. Falls back to a hash of the auth file. |
+| `AGENTMAIL_API_KEY` | No | Enables password-reset emails via AgentMail. Without it, reset links are logged to stdout instead of emailed. |
+| `AGENTMAIL_INBOX_ID` | No | Pin a specific AgentMail inbox to send from. Without it, one is auto-created (idempotent) on first reset request. |
 
 ## Auth
 
-Passwords stored as SHA-256 hex in `~/.equipment_dashboard_auth`.
+Login is by email — usernames must be valid email addresses (enforced by `is_valid_email()`
+in `dashboard.py`). Passwords are salted (werkzeug `generate_password_hash`, scrypt) and
+stored in `~/.equipment_dashboard_auth` as `email:hash` per line, permissions 600.
+Legacy unsalted SHA-256 entries (pre-hardening) are transparently upgraded on next login.
 
 ```bash
-python dashboard.py --setup-auth
+python dashboard.py --setup-auth      # create/update a user from the CLI
 ```
 
-File format: `username:hexhash` per line. Permissions: 600.
+There's no auto-created default account — the app refuses to start with zero users configured.
+
+**Password reset:** `/forgot-password` → `/reset-password?token=...` in `dashboard.py`.
+Tokens are single-use, expire after 30 minutes, and are stored separately in
+`~/.equipment_dashboard_resets` (600). Delivery goes through AgentMail (see Environment table).
+
+**Rate limiting:** `/login` (10 attempts / 5 min per IP) and `/forgot-password`
+(5 requests / 5 min per IP, plus a silent 3-emails / 15 min per-address throttle) use an
+in-process sliding-window limiter (`rate_limited()` in `dashboard.py`). It's per-worker, not
+shared across gunicorn's processes — fine at current traffic, revisit if abuse shows up.
 
 ## Price history
 
