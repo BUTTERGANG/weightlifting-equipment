@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS products (
     category    TEXT,
     currency    TEXT DEFAULT 'USD',
     url         TEXT,
+    image_url   TEXT,
     first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(site, name)
@@ -53,11 +54,25 @@ CREATE TABLE IF NOT EXISTS price_history (
     source_url  TEXT
 );
 
-CREATE INDEX IF NOT EXISTS idx_history_product 
+CREATE INDEX IF NOT EXISTS idx_history_product
     ON price_history(product_id, scraped_at DESC);
 
 CREATE INDEX IF NOT EXISTS idx_products_site
     ON products(site, category);
+
+CREATE TABLE IF NOT EXISTS scrape_runs (
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+    finished_at       TEXT,
+    status            TEXT NOT NULL DEFAULT 'running',
+    trigger           TEXT NOT NULL DEFAULT 'manual',
+    http_only         INTEGER NOT NULL DEFAULT 0,
+    products_scraped  INTEGER,
+    error             TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_scrape_runs_started
+    ON scrape_runs(started_at DESC);
 """
 
 
@@ -72,9 +87,18 @@ def get_db():
     return conn
 
 
+def _migrate_schema(conn):
+    """Add columns to pre-existing DBs that predate them (CREATE TABLE IF NOT
+    EXISTS in SCHEMA_SQL only helps brand-new databases)."""
+    cols = {row['name'] for row in conn.execute("PRAGMA table_info(products)")}
+    if 'image_url' not in cols:
+        conn.execute("ALTER TABLE products ADD COLUMN image_url TEXT")
+
+
 def init_db():
     conn = get_db()
     conn.executescript(SCHEMA_SQL)
+    _migrate_schema(conn)
     conn.commit()
     conn.close()
     print(f'Database initialized: {DB_PATH}')
@@ -97,6 +121,7 @@ def ingest_scrape(json_path):
 
     scraped_at = datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
     conn = get_db()
+    _migrate_schema(conn)
 
     inserted = 0
     updated = 0
@@ -108,6 +133,7 @@ def ingest_scrape(json_path):
         category = p.get('category')
         currency = p.get('currency', 'USD')
         url = p.get('url', '')
+        image_url = p.get('image_url', '')
         price = p.get('price')
         price_text = p.get('price_text')
         source_url = p.get('source_url', '')
@@ -117,13 +143,14 @@ def ingest_scrape(json_path):
 
         # Upsert into products
         cur = conn.execute("""
-            INSERT INTO products (site, name, category, currency, url)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO products (site, name, category, currency, url, image_url)
+            VALUES (?, ?, ?, ?, ?, ?)
             ON CONFLICT(site, name) DO UPDATE SET
-                category = COALESCE(NULLIF(?, ''), category),
-                url      = COALESCE(NULLIF(?, ''), url),
+                category  = COALESCE(NULLIF(?, ''), category),
+                url       = COALESCE(NULLIF(?, ''), url),
+                image_url = COALESCE(NULLIF(?, ''), image_url),
                 last_seen = datetime('now')
-        """, (site, name, category, currency, url, category, url))
+        """, (site, name, category, currency, url, image_url, category, url, image_url))
 
         if cur.rowcount == 0:
             updated += 1

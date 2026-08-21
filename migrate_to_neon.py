@@ -3,7 +3,7 @@
 One-time migration: copy existing SQLite data to Neon PostgreSQL.
 
 Usage:
-    DATABASE_URL=postgres://user:pass@ep-xxx.us-east-2.aws.neon.tech/lifttracker
+    DATABASE_URL=postgres://user:pass@ep-xxx.us-east-2.aws.neon.tech/plate-magnet
     python migrate_to_neon.py
 
 This reads from ~/equipment_data/equipment.db and pushes all products
@@ -63,6 +63,7 @@ cur.execute("""
     );
     CREATE INDEX IF NOT EXISTS idx_ph_product ON price_history(product_id, scraped_at DESC);
     CREATE INDEX IF NOT EXISTS idx_p_site ON products(site, category);
+    ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
 """)
 pg.commit()
 print("Schema created / verified")
@@ -74,20 +75,24 @@ print(f"Migrating {len(sqlite_products)} products...")
 product_id_map = {}  # sqlite_id -> pg_id
 products_migrated = 0
 
+sqlite_has_image_url = 'image_url' in (sqlite_products[0].keys() if sqlite_products else [])
+
 for row in sqlite_products:
+    image_url = row['image_url'] if sqlite_has_image_url else None
     cur.execute("""
-        INSERT INTO products (site, name, category, currency, url, first_seen, last_seen)
-        VALUES (%s, %s, %s, %s, %s, %s, %s)
+        INSERT INTO products (site, name, category, currency, url, image_url, first_seen, last_seen)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
         ON CONFLICT (site, name) DO UPDATE SET
-            category = COALESCE(NULLIF(%s, ''), products.category),
-            url = COALESCE(NULLIF(%s, ''), products.url),
+            category  = COALESCE(NULLIF(%s, ''), products.category),
+            url       = COALESCE(NULLIF(%s, ''), products.url),
+            image_url = COALESCE(NULLIF(%s, ''), products.image_url),
             first_seen = LEAST(products.first_seen, %s),
             last_seen = GREATEST(products.last_seen, %s)
         RETURNING id
     """, (
-        row['site'], row['name'], row['category'], row['currency'], row['url'],
+        row['site'], row['name'], row['category'], row['currency'], row['url'], image_url,
         row['first_seen'], row['last_seen'],
-        row['category'], row['url'], row['first_seen'], row['last_seen']
+        row['category'], row['url'], image_url, row['first_seen'], row['last_seen']
     ))
     pg_id = cur.fetchone()[0]
     product_id_map[row['id']] = pg_id

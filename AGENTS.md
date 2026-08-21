@@ -9,18 +9,27 @@ comparison. Runs on Replit with Neon PostgreSQL.
 - Python 3.12 · Flask · Playwright · BeautifulSoup
 - PostgreSQL (Neon) in production, SQLite locally
 - Chart.js on the frontend for price history
+- Dark-mode-first "cyber-athletic" UI: forced `color-scheme: dark` (native scrollbars,
+  select popups, form controls) across every route — no light theme
 
 ## What it monitors
 
-**HTTP (18 stores, no browser needed):**
+**HTTP (26 stores, no browser needed):**
 EliteFTS · Pioneer Fitness · Fringe Sport · Cerberus Strength ·
 Onyx Straps · LiftingLarge · 2POOD · American Barbell · REP Fitness ·
 Bells of Steel · Weightlifting House · Titan Fitness · Get Rx'd ·
-Hookgrip · Force USA · NoBull · Slingshot · Mark Bell
+Hookgrip · Force USA · NoBull · Slingshot · Mark Bell · TYR Sport ·
+LUXIAOJUN · SBD Apparel · Virus Intl · Born Primitive · Gymreapers ·
+Again Faster · Inzer Advance Designs
 
-**Playwright (9 stores, rate-limited / JS-rendered):**
-Rogue Fitness · TYR Sport · LUXIAOJUN · SBD Apparel · Virus Intl ·
-Born Primitive · Gymreapers · Again Faster · Inzer Advance Designs
+**Playwright (1 store — Rogue Fitness only):**
+Rogue is a Vue SPA with no public product JSON, so it still needs a real
+rendered DOM. Every other store previously here (TYR, LUXIAOJUN, SBD, Virus,
+Gymreapers, Inzer, Born Primitive, Again Faster) turned out to expose
+Shopify's public `/products.json` API even though their HTML pages block
+plain `requests` — moved to the HTTP path (`equipment_scraper.py`'s
+`extract_shopify_collection_json()`), which is faster, more reliable, and
+returns product images for free.
 
 ## Project structure
 
@@ -114,6 +123,17 @@ Each scrape run appends a row to `price_history` per product. After 5+ scrapes
 the dashboard shows meaningful trend lines. Deals are flagged when current
 price is >10% below the product's running historical average.
 
+## Product images
+
+`products.image_url` holds a hotlinked CDN URL from the retailer (Shopify's
+`/products.json`, WooCommerce Store API's `images`, or an `<img src>` scraped
+off the category page) — nothing is downloaded/cached locally. Populated on
+upsert (`COALESCE(NULLIF(new, ''), existing)`, same pattern as `category`/
+`url`), so a re-scrape never clobbers a known image with a missing one.
+Images can 404 over time as retailers change their CDN paths — the dashboard
+handles that client-side (`onerror` falls back to a placeholder), there's no
+server-side validation.
+
 ## Data flow
 
 ```
@@ -134,8 +154,21 @@ See AGENT-PLAYBOOK for the full archive. Relevant to this project:
   overlay fs, only `/home/runner/workspace` persists. The installer's binaries
   already land in the persisted path, but the `~/.local/bin/claude` PATH symlink
   it creates does not survive a restart, and neither does anything written to
-  `~/.bashrc`. Fix: a self-healing launcher lives at
-  `workspace/.local/bin/claude` (execs the newest dir under
-  `workspace/.local/share/claude/versions/`), and `PATH` is extended to include
-  it via `.replit`'s `[env]` block — `.replit` is a repo file, so it's always
-  reapplied at boot regardless of what happened to `$HOME`.
+  `~/.bashrc` (it's a symlink into `/nix/store`, not a real file — don't edit it
+  directly). Fix has two independent, redundant layers, both driven from
+  repo-tracked/persisted files so they're reapplied on every boot regardless of
+  what happened to `$HOME`:
+  1. A self-healing launcher at `workspace/.local/bin/claude` (execs the newest
+     dir under `workspace/.local/share/claude/versions/`), with `PATH` extended
+     to include it via `.replit`'s `[env]` block. This is what agent/workflow-mode
+     shells pick up (Replit rebuilds `/run/replit/env/latest` from `.replit` on
+     boot and sources it).
+  2. `workspace/.config/bashrc` — Nix's `replit-bashrc` sources
+     `${REPL_HOME}/.config/bashrc` for every *interactive* Shell tab (when
+     `REPLIT_MODE` is unset, i.e. a human-opened shell, not agent/workflow mode).
+     This file sets the same `PATH` + `CLAUDE_CONFIG_DIR` directly, independent
+     of the `.replit`-env rebuild pipeline. Added because layer 1 alone wasn't
+     enough — a stray half-written attempt at this (pointing at ephemeral
+     `$HOME/.local/bin` instead of the persisted path) was found abandoned in
+     the repo root, so a fresh Shell tab was still coming up without `claude`
+     on PATH.

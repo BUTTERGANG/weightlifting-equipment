@@ -19,6 +19,7 @@ import csv
 import io
 from datetime import datetime, timezone
 from pathlib import Path
+from urllib.parse import urljoin
 
 import requests
 from bs4 import BeautifulSoup
@@ -40,21 +41,40 @@ SITES = {
     },
     'tyr': {
         'name': 'TYR Sport',
-        'browser_key': 'tyr',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Lifters': 'https://tyr.com/collections/lifters',
+            'L-1 Lifters': 'https://tyr.com/collections/mens-l-1-lifters',
+            'L-2 Lifters': 'https://tyr.com/collections/mens-l-2-lifters',
+            "Women's Lifters": 'https://tyr.com/collections/womens-lifters',
+            'Trainers': 'https://tyr.com/collections/footwear-trainers',
+            'Barefoot': 'https://tyr.com/collections/footwear-barefoot',
+            'Accessories': 'https://tyr.com/collections/accessories',
+        },
+        'domain': 'tyr.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'luxiaojun': {
         'name': 'LUXIAOJUN',
-        'browser_key': 'luxiaojun',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Weightlifting Shoes': 'https://luxiaojun.com/collections/weightlifting-shoes',
+            'Shoes': 'https://luxiaojun.com/collections/shoes',
+            'Barefoot': 'https://luxiaojun.com/collections/barefoot-shoes',
+            'Apparel': 'https://luxiaojun.com/collections/apparel',
+            'Gear': 'https://luxiaojun.com/collections/gear',
+        },
+        'domain': 'luxiaojun.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'sbd': {
         'name': 'SBD Apparel',
-        'browser_key': 'sbd',
-        'note': 'Shopify — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'All': 'https://sbdapparel.com/collections/all',
+        },
+        'domain': 'sbdapparel.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'rep': {
         'name': 'REP Fitness',
@@ -164,9 +184,19 @@ SITES = {
     },
     'gymreapers': {
         'name': 'Gymreapers',
-        'browser_key': 'gymreapers',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Belts': 'https://www.gymreapers.com/collections/10mm-lever-belts',
+            'Knee Sleeves': 'https://www.gymreapers.com/collections/powerlifting-knee-sleeves',
+            'Elbow Sleeves': 'https://www.gymreapers.com/collections/elbow-sleeves',
+            'Wrist Wraps': 'https://www.gymreapers.com/collections/wrist-wraps',
+            'Straps': 'https://www.gymreapers.com/collections/lifting-straps',
+            'Accessories': 'https://www.gymreapers.com/collections/accessories',
+            'Apparel': 'https://www.gymreapers.com/collections/shirts',
+            'Equipment': 'https://www.gymreapers.com/collections/equipment',
+        },
+        'domain': 'www.gymreapers.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'americanbarbell': {
         'name': 'American Barbell',
@@ -197,9 +227,18 @@ SITES = {
     },
     'againfaster': {
         'name': 'Again Faster',
-        'browser_key': 'againfaster',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Racks': 'https://www.againfaster.com/collections/freestanding-racks-and-rigs',
+            'Barbells': 'https://www.againfaster.com/collections/barbells',
+            'Plates': 'https://www.againfaster.com/collections/competition-plates-kg',
+            'Benches': 'https://www.againfaster.com/collections/benches',
+            'Dumbbells': 'https://www.againfaster.com/collections/dumbbells',
+            'Accessories': 'https://www.againfaster.com/collections/comp-accessories',
+            'Footwear': 'https://www.againfaster.com/collections/footwear',
+        },
+        'domain': 'www.againfaster.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'cerberus': {
         'name': 'Cerberus Strength',
@@ -235,21 +274,51 @@ SITES = {
     },
     'inzer': {
         'name': 'Inzer Advance Designs',
-        'browser_key': 'inzer',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Bench Shirts': 'https://inzernet.com/collections/bench-shirts-1',
+            'Squat Suits': 'https://inzernet.com/collections/squat-suits',
+            'DL Suits': 'https://inzernet.com/collections/dl-suits-dl-shirts',
+            'Belts': 'https://inzernet.com/collections/power-belts',
+            'Knee Wraps': 'https://inzernet.com/collections/knee-wraps-1',
+            'Knee Sleeves': 'https://inzernet.com/collections/knee-sleeves-1',
+            'Wrist Wraps': 'https://inzernet.com/collections/wrist-wraps-1',
+            'Singlets': 'https://inzernet.com/collections/singlets',
+            'Shoes': 'https://inzernet.com/collections/shoes',
+            'Accessories': 'https://inzernet.com/collections/accessories-1',
+        },
+        'domain': 'inzernet.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'bornprimitive': {
         'name': 'Born Primitive',
-        'browser_key': 'bornprimitive',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Men': 'https://bornprimitive.com/collections/born-primitive-all-men',
+            'Women': 'https://bornprimitive.com/collections/born-primitive-all-women',
+            'Accessories': 'https://bornprimitive.com/collections/accessories',
+        },
+        'domain': 'bornprimitive.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'virus': {
         'name': 'Virus International',
-        'browser_key': 'virus',
-        'note': 'Shopify rate-limited — requires --browser flag',
-        'requires_browser': True,
+        'urls': {
+            'Singlets': 'https://virusintl.com/collections/mens-and-womens-singlets',
+            "Men's Shorts": 'https://virusintl.com/collections/mens-active-shorts',
+            "Women's Shorts": 'https://virusintl.com/collections/womens-shorts',
+            "Men's Compression": 'https://virusintl.com/collections/mens-compression-pant',
+            "Women's Compression": 'https://virusintl.com/collections/womens-compression-pants',
+            'Jackets': 'https://virusintl.com/collections/mens-womens-jackets',
+            "Men's Tops": 'https://virusintl.com/collections/mens-shirts-tanks',
+            "Women's Tops": 'https://virusintl.com/collections/womens-shirts-tanks',
+            'Bags': 'https://virusintl.com/collections/backpack',
+            'Accessories': 'https://virusintl.com/collections/accessories',
+            'USAW Gear': 'https://virusintl.com/collections/usaw-x-virus',
+        },
+        'domain': 'virusintl.com',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
     },
     'hookgrip': {
         'name': 'Hookgrip',
@@ -381,61 +450,65 @@ def fetch_page(url):
     return None
 
 
-# ── Parser: Shopify preloaded JSON ────────────────────────────────────────
-# Pattern found across Titan, EliteFTS, REP, Bells of Steel:
-#   "price":12345,"name":"Product Name"
-# where price is in cents.
+# ── Parser: Shopify public /products.json API ────────────────────────────
+# Every Shopify storefront exposes its collections as JSON by appending
+# /products.json to the collection URL (e.g. .../collections/barbells ->
+# .../collections/barbells/products.json), paginated via ?limit=250&page=N.
+# This is far more reliable than scraping the rendered HTML/preloaded JSON
+# blob (themes vary, markup changes), and it comes with real product images
+# and handles for free. Also works for a handful of sites that block the
+# plain HTML collection page but not this API (TYR, LUXIAOJUN, SBD, Virus,
+# Gymreapers, Inzer, Born Primitive, Again Faster) — verified live, so those
+# no longer need Playwright.
 
-def extract_shopify_preload(html_text, domain, currency='USD'):
+def extract_shopify_collection_json(collection_url, currency='USD', min_price=1.0):
     products = []
     seen = set()
+    base = collection_url.split('?')[0].rstrip('/')
+    domain = re.sub(r'^https?://', '', base).split('/')[0]
+    page = 1
 
-    # Pattern 1: variant-level data with name and price in cents
-    pattern1 = re.compile(r'\{"id":(\d+),"price":(\d+),"name":"([^"]+)"')
-    for vid, price_cents, name in pattern1.findall(html_text):
-        key = (name, price_cents)
-        if key in seen:
-            continue
-        seen.add(key)
+    while page <= 20:  # safety cap — no collection realistically has 5000+ items
+        r = requests.get(f'{base}/products.json', params={'limit': 250, 'page': page},
+                          headers=HEADERS, timeout=TIMEOUT)
+        if r.status_code != 200:
+            break
+        try:
+            items = r.json().get('products', [])
+        except ValueError:
+            break
+        if not items:
+            break
 
-        price = safe_price(price_cents) / 100 if price_cents else None
-        price = round(price, 2) if price else None
+        for item in items:
+            title = (item.get('title') or '').strip()
+            handle = item.get('handle', '')
+            key = handle or title
+            if not title or key in seen:
+                continue
+            seen.add(key)
 
-        # Build product URL from handle if present later
-        products.append({
-            'name': name.strip(),
-            'price': price,
-            'price_text': f'${price:.2f}' if price else None,
-            'currency': currency,
-            'url': None,
-            'handle': None,
-        })
+            price = None
+            for v in item.get('variants', []) or []:
+                vp = safe_price(v.get('price'))
+                if vp and vp >= min_price and (price is None or vp < price):
+                    price = vp
 
-    # Pattern 2: handles for product links
-    handle_pattern = re.compile(r'"handle":"([^"]+)"')
-    handles = handle_pattern.findall(html_text)
-    handles = list(dict.fromkeys(handles))  # dedup, preserve order
+            images = item.get('images') or []
+            image_url = images[0].get('src') if images else None
 
-    # Match handles to products by name similarity
-    if handles and products:
-        for p in products:
-            # Find matching handle by normalized name
-            name_slug = re.sub(r'[^a-z0-9]+', '-', p['name'].lower()).strip('-')
-            for h in handles:
-                if h == name_slug or h in name_slug or name_slug in h:
-                    p['handle'] = h
-                    p['url'] = f'https://{domain}/products/{h}'
-                    break
-            # Fallback: partial match
-            if not p['url'] and handles:
-                for h in handles:
-                    # Remove color/variant modifiers for loose matching
-                    base_h = re.sub(r'--?\s*\w+$', '', h)
-                    base_n = re.sub(r'[-–—].+$', '', name_slug)
-                    if base_h in base_n or base_n in base_h:
-                        p['handle'] = h
-                        p['url'] = f'https://{domain}/products/{h}'
-                        break
+            products.append({
+                'name': title,
+                'price': price,
+                'price_text': f'${price:.2f}' if price else None,
+                'currency': currency,
+                'url': f'https://{domain}/products/{handle}' if handle else None,
+                'image_url': image_url,
+            })
+
+        if len(items) < 250:
+            break
+        page += 1
 
     return products
 
@@ -475,12 +548,15 @@ def extract_magento(base_url, currency='USD'):
                 continue
             seen.add(key)
             href = name_el.get('href', '')
+            img_el = item.select_one('img.product-image-photo') or item.select_one('img')
+            image_url = img_el.get('src') if img_el else None
             products.append({
                 'name': name,
                 'price': round(price, 2),
                 'price_text': f'${price:.2f}',
                 'currency': currency,
                 'url': href,
+                'image_url': image_url,
             })
             found = True
 
@@ -534,6 +610,8 @@ def extract_woocommerce_store(url_base, currency='USD'):
 
             # Build URL from permalink
             url = item.get('permalink', '') or item.get('slug', '')
+            images = item.get('images') or []
+            image_url = images[0].get('src') if images else None
 
             products.append({
                 'name': name,
@@ -541,6 +619,7 @@ def extract_woocommerce_store(url_base, currency='USD'):
                 'price_text': f'${price:.2f}',
                 'currency': currency,
                 'url': url,
+                'image_url': image_url,
             })
 
         total_pages = int(r.headers.get('X-WP-TotalPages', 0))
@@ -662,12 +741,16 @@ def extract_liftinglarge(html_text):
         price_match = re.search(r'\$([\d,]+\.?\d*)', price_text)
         price = float(price_match.group(1).replace(',', '')) if price_match else None
 
+        img_el = item.find('img')
+        image_url = urljoin('https://www.liftinglarge.com/', img_el['src']) if img_el and img_el.get('src') else None
+
         products.append({
             'name': name.strip(),
             'price': price,
             'price_text': f'${price:.2f}' if price else price_text[:50] or None,
             'currency': 'USD',
             'url': url,
+            'image_url': image_url,
         })
 
     return products
@@ -705,19 +788,21 @@ def scrape_site(site_key, config):
         # LiftingLarge: use viewall=1 to get all products on one page
         if parser == 'liftinglarge' and '?' not in url:
             url = url + '?viewall=1'
-        
+
         if parser == 'magento':
             # Magento handles fetching + pagination internally
             products = extract_magento(url, config.get('currency', 'USD'))
+        elif parser == 'shopify_preload':
+            # Hits the collection's /products.json API directly — no need to
+            # fetch/parse the HTML page for this parser.
+            products = extract_shopify_collection_json(url, config.get('currency', 'USD'))
         else:
             html = fetch_page(url)
             if not html:
                 print(f'  {category}: failed ({url})')
                 continue
 
-            if parser == 'shopify_preload':
-                products = extract_shopify_preload(html, config.get('domain', ''), config.get('currency', 'USD'))
-            elif parser == 'liftinglarge':
+            if parser == 'liftinglarge':
                 products = extract_liftinglarge(html)
             elif parser == 'dom_hydrate':
                 products = extract_dom_hydrate(html, config.get('domain', ''), config.get('currency', 'USD'))

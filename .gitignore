@@ -5,4 +5,5 @@ data/
 *.db-wal
 *.db-shm
 .equipment_dashboard_auth
+.equipment_dashboard_resets
 __pycache__

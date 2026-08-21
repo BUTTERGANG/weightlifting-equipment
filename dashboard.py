@@ -1,6 +1,6 @@
 #!/home/alex/.hermes/venv/bin/python3
 """
-Weightlifting Equipment Price Dashboard — LiftTracker.
+Weightlifting Equipment Price Dashboard — Plate Magnet.
 
 Tracks barbell, plate, rack, belt, apparel & shoe prices across 27+ retailers.
 Supports SQLite (local dev) and PostgreSQL / Neon (Replit production).
@@ -22,8 +22,9 @@ import sqlite3
 import hashlib
 import argparse
 import threading
+import subprocess
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from functools import wraps
 from collections import defaultdict
 from flask import Flask, g, request, jsonify, render_template_string, session, redirect, url_for
@@ -33,12 +34,28 @@ from werkzeug.security import generate_password_hash, check_password_hash
 
 DB_PATH = Path.home() / 'equipment_data' / 'equipment.db'
 DATABASE_URL = os.environ.get('DATABASE_URL', '')
-AUTH_FILE = Path.home() / '.equipment_dashboard_auth'
-RESET_FILE = Path.home() / '.equipment_dashboard_resets'
+# AUTH_FILE/RESET_FILE live next to the script (inside the persisted workspace
+# dir), not under Path.home() — on Replit, $HOME is an ephemeral overlay wiped
+# on every container restart, which was locking everyone out of the dashboard.
+APP_DIR = Path(__file__).resolve().parent
+AUTH_FILE = APP_DIR / '.equipment_dashboard_auth'
+RESET_FILE = APP_DIR / '.equipment_dashboard_resets'
 RESET_TOKEN_TTL = 30 * 60  # seconds
 
 AGENTMAIL_API_KEY = os.environ.get('AGENTMAIL_API_KEY', '')
 AGENTMAIL_INBOX_ID = os.environ.get('AGENTMAIL_INBOX_ID', '')
+
+# ── Scraping ──────────────────────────────────────────────────────────────
+# Scrapes run as a detached subprocess (scraper/run_scrape.py) launched from
+# this app, tracked via the scrape_runs table. In production (DATABASE_URL
+# set, gunicorn with multiple workers) a background thread also launches one
+# automatically every SCRAPE_INTERVAL_HOURS, guarded by a Postgres advisory
+# lock so only one worker ever fires it.
+SCRAPER_SCRIPT = Path(__file__).resolve().parent / 'scraper' / 'run_scrape.py'
+SCRAPE_LOG_DIR = Path(__file__).resolve().parent / 'data' / 'scrape_logs'
+SCRAPE_INTERVAL_HOURS = float(os.environ.get('SCRAPE_INTERVAL_HOURS', '6'))
+AUTO_SCRAPE = os.environ.get('AUTO_SCRAPE', '1') not in ('0', 'false', 'False')
+_SCRAPE_SCHEDULER_LOCK_KEY = 872341  # arbitrary constant for pg_try_advisory_lock
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('DASHBOARD_SECRET') or hashlib.sha256(
@@ -103,6 +120,153 @@ def fetch_one(sql, params=()):
     """Execute query, return single dict or None."""
     rows = fetch_dict(sql, params)
     return rows[0] if rows else None
+
+
+# ── Scraping ──────────────────────────────────────────────────────────────
+
+def ensure_scrape_runs_table():
+    if DATABASE_URL:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.cursor().execute("""
+            CREATE TABLE IF NOT EXISTS scrape_runs (
+                id                SERIAL PRIMARY KEY,
+                started_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+                finished_at       TIMESTAMP,
+                status            TEXT NOT NULL DEFAULT 'running',
+                trigger           TEXT NOT NULL DEFAULT 'manual',
+                http_only         BOOLEAN NOT NULL DEFAULT FALSE,
+                products_scraped  INTEGER,
+                error             TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_scrape_runs_started ON scrape_runs(started_at DESC);
+        """)
+        conn.commit()
+        conn.close()
+    else:
+        from scraper.equipment_db import get_db as get_sqlite_db
+        conn = get_sqlite_db()
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS scrape_runs (
+                id                INTEGER PRIMARY KEY AUTOINCREMENT,
+                started_at        TEXT NOT NULL DEFAULT (datetime('now')),
+                finished_at       TEXT,
+                status            TEXT NOT NULL DEFAULT 'running',
+                trigger           TEXT NOT NULL DEFAULT 'manual',
+                http_only         INTEGER NOT NULL DEFAULT 0,
+                products_scraped  INTEGER,
+                error             TEXT
+            )
+        """)
+        conn.commit()
+        conn.close()
+
+
+def launch_scrape(trigger='manual', http_only=False):
+    """Insert a scrape_runs row and launch scraper/run_scrape.py as a detached
+    subprocess that updates that row itself as it progresses. Returns the run id."""
+    if DATABASE_URL:
+        insert_sql = """INSERT INTO scrape_runs (status, trigger, http_only)
+                         VALUES ('running', %s, %s) RETURNING id"""
+        row = fetch_one(insert_sql, (trigger, http_only))
+        db = get_db()
+        db.commit()
+        run_id = row['id']
+    else:
+        db = get_db()
+        cur = db.execute(
+            "INSERT INTO scrape_runs (status, trigger, http_only) VALUES ('running', ?, ?)",
+            (trigger, int(http_only)))
+        db.commit()
+        run_id = cur.lastrowid
+
+    SCRAPE_LOG_DIR.mkdir(parents=True, exist_ok=True)
+    log_path = SCRAPE_LOG_DIR / f'run_{run_id}.log'
+    cmd = [sys.executable, str(SCRAPER_SCRIPT), '--run-id', str(run_id)]
+    if http_only:
+        cmd.append('--http-only')
+
+    env = os.environ.copy()
+    with open(log_path, 'w') as log_file:
+        subprocess.Popen(cmd, cwd=str(SCRAPER_SCRIPT.parent.parent), env=env,
+                          stdout=log_file, stderr=subprocess.STDOUT,
+                          start_new_session=True)
+    return run_id
+
+
+def _maybe_run_scheduled_scrape():
+    """Called periodically by the scheduler thread. Uses a Postgres advisory
+    lock so that with multiple gunicorn workers, only one of them ever
+    launches the scheduled scrape."""
+    if not DATABASE_URL:
+        return
+    import psycopg2
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    cur = conn.cursor()
+    try:
+        cur.execute("SELECT pg_try_advisory_lock(%s)", (_SCRAPE_SCHEDULER_LOCK_KEY,))
+        if not cur.fetchone()[0]:
+            return
+        cur.execute("SELECT COUNT(*) FROM scrape_runs WHERE status = 'running'")
+        if cur.fetchone()[0] > 0:
+            return
+        cur.execute("SELECT MAX(started_at) FROM scrape_runs")
+        last = cur.fetchone()[0]
+        due = last is None or (datetime.now(timezone.utc) - last.replace(tzinfo=timezone.utc)
+                                >= timedelta(hours=SCRAPE_INTERVAL_HOURS))
+        if due:
+            print(f'[scheduler] launching scheduled scrape (interval={SCRAPE_INTERVAL_HOURS}h)', flush=True)
+            with app.app_context():
+                launch_scrape(trigger='scheduled')
+    finally:
+        cur.execute("SELECT pg_advisory_unlock(%s)", (_SCRAPE_SCHEDULER_LOCK_KEY,))
+        conn.close()
+
+
+def _scheduler_loop():
+    check_every = 300  # seconds
+    while True:
+        time.sleep(check_every)
+        try:
+            _maybe_run_scheduled_scrape()
+        except Exception as e:
+            print(f'[scheduler] error: {e}', flush=True)
+
+
+def ensure_image_url_column():
+    """products.image_url was added after this DB was first created — CREATE
+    TABLE IF NOT EXISTS in the scraper's schema doesn't retrofit existing
+    tables, so make sure the column exists here too (dashboard.py is the
+    always-running process; a scrape may not have run yet since deploy)."""
+    if DATABASE_URL:
+        import psycopg2
+        conn = psycopg2.connect(DATABASE_URL)
+        conn.cursor().execute("ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT")
+        conn.commit()
+        conn.close()
+    else:
+        from scraper.equipment_db import get_db as get_sqlite_db
+        conn = get_sqlite_db()
+        exists = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='products'").fetchone()
+        if exists:
+            cols = {row['name'] for row in conn.execute("PRAGMA table_info(products)")}
+            if 'image_url' not in cols:
+                conn.execute("ALTER TABLE products ADD COLUMN image_url TEXT")
+                conn.commit()
+        conn.close()
+
+
+if DATABASE_URL or DB_PATH.exists():
+    try:
+        ensure_scrape_runs_table()
+        ensure_image_url_column()
+    except Exception as e:
+        print(f'Could not run schema migrations: {e}', flush=True)
+
+if DATABASE_URL and AUTO_SCRAPE:
+    threading.Thread(target=_scheduler_loop, daemon=True).start()
 
 
 # ── Auth ──────────────────────────────────────────────────────────────────
@@ -175,7 +339,7 @@ def get_agentmail_inbox_id():
     client = get_agentmail_client()
     if client is None:
         return None
-    inbox = client.inboxes.create(client_id='lifttracker-dashboard')
+    inbox = client.inboxes.create(client_id='plate-magnet-dashboard')
     _agentmail_inbox_id = inbox.inbox_id
     return _agentmail_inbox_id
 
@@ -222,11 +386,11 @@ def send_reset_email(to_email, reset_url):
     client.inboxes.messages.send(
         inbox_id,
         to=to_email,
-        subject="Reset your LiftTracker password",
-        text=(f"Click the link below to reset your LiftTracker password. "
+        subject="Reset your Plate Magnet password",
+        text=(f"Click the link below to reset your Plate Magnet password. "
               f"This link expires in 30 minutes.\n\n{reset_url}\n\n"
               f"If you didn't request this, you can ignore this email."),
-        html=(f'<p>Click the link below to reset your LiftTracker password. '
+        html=(f'<p>Click the link below to reset your Plate Magnet password. '
               f'This link expires in 30 minutes.</p>'
               f'<p><a href="{reset_url}">{reset_url}</a></p>'
               f'<p>If you didn\'t request this, you can ignore this email.</p>'),
@@ -300,7 +464,7 @@ LOGIN_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LiftTracker — Login</title>
+<title>Plate Magnet — Login</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -480,7 +644,7 @@ button:hover {
 <div class="login-card">
   <div class="brand">
     <div class="brand-icon">⚡</div>
-    <div class="brand-name">LIFT<span>TRACKER</span></div>
+    <div class="brand-name">PLATE<span>MAGNET</span></div>
   </div>
   <div class="subtitle">Real-time equipment intelligence & deal radar</div>
   <div class="error-box" id="errorMsg"></div>
@@ -560,7 +724,7 @@ FORGOT_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LiftTracker — Reset Password</title>
+<title>Plate Magnet — Reset Password</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -685,7 +849,7 @@ RESET_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LiftTracker — Set New Password</title>
+<title>Plate Magnet — Set New Password</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -865,7 +1029,7 @@ ERROR_404_HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LiftTracker — 404 Not Found</title>
+<title>Plate Magnet — 404 Not Found</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
@@ -957,7 +1121,7 @@ HTML = r"""<!DOCTYPE html>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>LiftTracker — Equipment Price Intelligence</title>
+<title>Plate Magnet — Equipment Price Intelligence</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -1110,6 +1274,13 @@ header {
   padding: 6px 14px;
   border-radius: 30px;
   border: 1px solid var(--border);
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.scrape-pulse:hover {
+  border-color: var(--cyan);
+  color: var(--text-main);
 }
 
 .pulse-dot {
@@ -1121,10 +1292,100 @@ header {
   animation: pulse-ring 2s infinite;
 }
 
+.pulse-dot.running {
+  background: var(--amber);
+  box-shadow: 0 0 10px var(--amber);
+  animation: pulse-ring-fast 1s infinite;
+}
+
 @keyframes pulse-ring {
   0% { transform: scale(0.95); opacity: 0.8; }
   50% { transform: scale(1.3); opacity: 1; filter: drop-shadow(0 0 4px var(--emerald)); }
   100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+@keyframes pulse-ring-fast {
+  0% { transform: scale(0.95); opacity: 0.8; }
+  50% { transform: scale(1.3); opacity: 1; filter: drop-shadow(0 0 4px var(--amber)); }
+  100% { transform: scale(0.95); opacity: 0.8; }
+}
+
+/* ── Scrape History Modal ── */
+.scrape-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.scrape-schedule-note {
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.scrape-run-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.scrape-run-table th {
+  text-align: left;
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+}
+
+.scrape-run-table td {
+  padding: 9px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-main);
+}
+
+.scrape-run-table tr:last-child td {
+  border-bottom: none;
+}
+
+.status-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 9px;
+  border-radius: 6px;
+  font-size: 11.5px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+
+.status-pill.running {
+  background: rgba(245, 158, 11, 0.12);
+  color: var(--amber);
+  border: 1px solid rgba(245, 158, 11, 0.3);
+}
+
+.status-pill.success {
+  background: var(--emerald-glow);
+  color: #34d399;
+  border: 1px solid rgba(16, 185, 129, 0.3);
+}
+
+.status-pill.error {
+  background: rgba(244, 63, 94, 0.12);
+  color: var(--rose);
+  border: 1px solid rgba(244, 63, 94, 0.3);
+}
+
+.scrape-empty {
+  padding: 30px 10px;
+  text-align: center;
+  color: var(--text-dim);
+  font-size: 13.5px;
 }
 
 .user-pill {
@@ -1479,6 +1740,58 @@ tbody td {
   max-width: 440px;
 }
 
+.prod-thumb-col {
+  width: 52px;
+}
+
+.prod-thumb {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  object-fit: cover;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  display: block;
+}
+
+.prod-thumb-placeholder {
+  width: 40px;
+  height: 40px;
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  color: var(--text-dim);
+}
+
+.detail-hero {
+  width: 100%;
+  max-height: 260px;
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.detail-hero img {
+  width: 100%;
+  max-height: 260px;
+  object-fit: contain;
+  display: block;
+}
+
+.detail-hero-placeholder {
+  padding: 50px 0;
+  font-size: 34px;
+  color: var(--text-dim);
+}
+
 .prod-link {
   color: #fff;
   font-weight: 600;
@@ -1804,12 +2117,12 @@ tbody td {
   <div class="nav-container">
     <a href="/" class="brand">
       <div class="brand-icon">⚡</div>
-      <div class="brand-title">LIFT<span>TRACKER</span></div>
+      <div class="brand-title">PLATE<span>MAGNET</span></div>
       <div class="brand-badge">PRO RADAR</div>
     </a>
     <div class="nav-actions">
-      <div class="scrape-pulse">
-        <div class="pulse-dot"></div>
+      <div class="scrape-pulse" onclick="openScrapeModal()" title="View scrape history / run a scrape">
+        <div class="pulse-dot" id="pulseDot"></div>
         <span>Sync: <strong id="lastScrape" style="color:#fff">—</strong></span>
       </div>
       <div class="user-pill">
@@ -1900,6 +2213,7 @@ tbody td {
       <table>
         <thead>
           <tr>
+            <th class="prod-thumb-col"></th>
             <th onclick="sortBy('name')" style="min-width:320px">
               Equipment / Item <span class="sort-arrow" id="s-name">↓</span>
             </th>
@@ -1935,6 +2249,45 @@ tbody td {
 
 </main>
 
+<!-- Scrape History Modal -->
+<div class="modal-overlay" id="scrapeModalOverlay" onclick="handleScrapeOverlayClick(event)">
+  <div class="modal-card" id="scrapeModalCard" style="max-width:640px">
+    <div class="modal-header">
+      <div class="modal-title-area">
+        <h2>Scrape Activity</h2>
+        <div class="modal-meta-row">
+          <span class="scrape-schedule-note" id="scrapeScheduleNote">—</span>
+        </div>
+      </div>
+      <button class="modal-close-btn" onclick="closeScrapeModal()">✕</button>
+    </div>
+
+    <div class="modal-body">
+      <div class="scrape-toolbar">
+        <div id="scrapeError" style="color:var(--rose);font-size:13px;display:none"></div>
+        <button class="action-btn" id="runScrapeBtn" onclick="triggerScrape()">
+          <span>🔄</span> <span id="runScrapeBtnLabel">Run Scrape Now</span>
+        </button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="scrape-run-table">
+          <thead>
+            <tr>
+              <th>Started</th>
+              <th>Trigger</th>
+              <th>Status</th>
+              <th>Products</th>
+            </tr>
+          </thead>
+          <tbody id="scrapeRunsBody">
+            <tr><td colspan="4" class="scrape-empty">Loading…</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- Modern Detail Modal -->
 <div class="modal-overlay" id="modalOverlay" onclick="handleOverlayClick(event)">
   <div class="modal-card" id="modalCard">
@@ -1953,6 +2306,9 @@ tbody td {
     </div>
 
     <div class="modal-body">
+      <!-- Product image -->
+      <div class="detail-hero" id="detailHero"></div>
+
       <!-- Hot Deal Banner if applicable -->
       <div id="detailDealBanner" class="deal-banner" style="display:none">
         <div class="deal-banner-left">
@@ -2179,7 +2535,7 @@ function render() {
   const body = document.getElementById('productBody');
 
   if (!page.length) {
-    body.innerHTML = `<tr><td colspan="6" style="text-align:center;padding:40px;color:var(--text-dim);">No equipment matches the selected filters.</td></tr>`;
+    body.innerHTML = `<tr><td colspan="7" style="text-align:center;padding:40px;color:var(--text-dim);">No equipment matches the selected filters.</td></tr>`;
   } else {
     body.innerHTML = page.map(p => {
       const c = storeColor(p.site);
@@ -2187,11 +2543,15 @@ function render() {
       const dealBadge = hasDeal
         ? `<span class="deal-badge">🔥 -${p.deal_pct.toFixed(0)}%</span>`
         : `<span style="color:var(--text-dim);font-size:12px;">Normal</span>`;
-      
+
       const priceClass = hasDeal ? 'price-box deal' : 'price-box';
       const formattedPrice = p.price ? `$${p.price.toFixed(2)}` : (p.price_text || '—');
+      const thumb = p.image_url
+        ? `<img class="prod-thumb" src="${esc(p.image_url)}" alt="" loading="lazy" onerror="this.outerHTML='<div class=prod-thumb-placeholder>📦</div>'">`
+        : `<div class="prod-thumb-placeholder">📦</div>`;
 
       return `<tr>
+        <td class="prod-thumb-col">${thumb}</td>
         <td class="prod-name-col">
           <a class="prod-link" onclick="showDetail(${p.id})">${esc(p.name)}</a>
         </td>
@@ -2273,6 +2633,11 @@ async function showDetail(id) {
     storeBadge.style.border = `1px solid ${c}66`;
 
     document.getElementById('detailCatPill').textContent = prod.category || 'General';
+
+    const hero = document.getElementById('detailHero');
+    hero.innerHTML = prod.image_url
+      ? `<img src="${esc(prod.image_url)}" alt="" onerror="this.parentElement.innerHTML='<div class=detail-hero-placeholder>📦</div>'">`
+      : `<div class="detail-hero-placeholder">📦</div>`;
 
     const extLink = document.getElementById('detailExternalLink');
     if (prod.url) {
@@ -2426,13 +2791,108 @@ function exportFilteredCSV() {
   const encodedUri = encodeURI(csvContent);
   const link = document.createElement('a');
   link.setAttribute('href', encodedUri);
-  link.setAttribute('download', `lifttracker_export_${new Date().toISOString().slice(0,10)}.csv`);
+  link.setAttribute('download', `plate_magnet_export_${new Date().toISOString().slice(0,10)}.csv`);
   document.body.appendChild(link);
   link.click();
   document.body.removeChild(link);
 }
 
+// ── Scrape Activity ──────────────────────────────────────────────────────
+
+let scrapePollTimer = null;
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s == null ? '' : String(s);
+  return d.innerHTML;
+}
+
+function openScrapeModal() {
+  document.getElementById('scrapeModalOverlay').classList.add('active');
+  refreshScrapeRuns();
+  if (!scrapePollTimer) {
+    scrapePollTimer = setInterval(refreshScrapeRuns, 4000);
+  }
+}
+
+function closeScrapeModal() {
+  document.getElementById('scrapeModalOverlay').classList.remove('active');
+  if (scrapePollTimer) {
+    clearInterval(scrapePollTimer);
+    scrapePollTimer = null;
+  }
+}
+
+function handleScrapeOverlayClick(e) {
+  if (e.target.id === 'scrapeModalOverlay') {
+    closeScrapeModal();
+  }
+}
+
+async function refreshScrapeRuns() {
+  try {
+    const res = await fetch('/api/scrape/runs');
+    const data = await res.json();
+    const runs = data.runs || [];
+    const running = runs.some(r => r.status === 'running');
+
+    const btn = document.getElementById('runScrapeBtn');
+    const label = document.getElementById('runScrapeBtnLabel');
+    btn.disabled = running;
+    btn.style.opacity = running ? 0.6 : 1;
+    btn.style.cursor = running ? 'default' : 'pointer';
+    label.textContent = running ? 'Scrape running…' : 'Run Scrape Now';
+
+    document.getElementById('pulseDot').classList.toggle('running', running);
+
+    document.getElementById('scrapeScheduleNote').textContent = data.auto_scrape
+      ? `Auto-scrapes every ${data.interval_hours}h`
+      : 'Manual trigger only';
+
+    const body = document.getElementById('scrapeRunsBody');
+    if (!runs.length) {
+      body.innerHTML = '<tr><td colspan="4" class="scrape-empty">No scrapes yet — run one to populate the dashboard.</td></tr>';
+      return;
+    }
+    body.innerHTML = runs.map(r => `
+      <tr>
+        <td>${escapeHtml(r.started_at || '—')}</td>
+        <td style="color:var(--text-muted)">${escapeHtml(r.trigger)}</td>
+        <td><span class="status-pill ${r.status}">${escapeHtml(r.status)}</span>${r.error ? ` <span style="color:var(--text-dim);font-size:11.5px" title="${escapeHtml(r.error)}">⚠</span>` : ''}</td>
+        <td>${r.products_scraped != null ? r.products_scraped.toLocaleString() : '—'}</td>
+      </tr>
+    `).join('');
+
+    // If a scrape just finished, refresh the underlying product data too.
+    if (!running && window._lastScrapeWasRunning) {
+      loadData();
+    }
+    window._lastScrapeWasRunning = running;
+  } catch (e) {
+    console.error('Failed to load scrape runs:', e);
+  }
+}
+
+async function triggerScrape() {
+  const errBox = document.getElementById('scrapeError');
+  errBox.style.display = 'none';
+  try {
+    const res = await fetch('/api/scrape', { method: 'POST' });
+    const data = await res.json();
+    if (!res.ok) {
+      errBox.textContent = data.error || 'Failed to start scrape';
+      errBox.style.display = 'block';
+      return;
+    }
+    refreshScrapeRuns();
+  } catch (e) {
+    errBox.textContent = 'Failed to start scrape';
+    errBox.style.display = 'block';
+  }
+}
+
 loadData();
+setInterval(refreshScrapeRuns, 30000);
 </script>
 </body>
 </html>"""
@@ -2469,7 +2929,7 @@ def api_products():
                 FROM price_history
                 GROUP BY product_id
             )
-            SELECT p.id, p.site, p.name, p.category, p.currency, p.url,
+            SELECT p.id, p.site, p.name, p.category, p.currency, p.url, p.image_url,
                    l.price, l.price_text, l.scraped_at,
                    s.avg_price, s.min_price, s.max_price, s.price_range, s.history_count
             FROM products p
@@ -2498,7 +2958,7 @@ def api_products():
                 FROM price_history
                 GROUP BY product_id
             )
-            SELECT p.id, p.site, p.name, p.category, p.currency, p.url,
+            SELECT p.id, p.site, p.name, p.category, p.currency, p.url, p.image_url,
                    l.price, l.price_text, l.scraped_at,
                    s.avg_price, s.min_price, s.max_price, s.price_range, s.history_count
             FROM products p
@@ -2626,7 +3086,7 @@ def api_meta():
         'total_products': total['c'] if total else 0,
         'total_stores': store_count['c'] if store_count else 0,
         'category_count': cat_count['c'] if cat_count else 0,
-        'last_scrape': last['last'][:19].replace('T', ' ') if last and last['last'] else None,
+        'last_scrape': _fmt_ts(last['last']) if last else None,
     })
 
 
@@ -2636,10 +3096,45 @@ def api_me():
     return jsonify({'user': session.get('user', '')})
 
 
+def _fmt_ts(v):
+    if v is None:
+        return None
+    if isinstance(v, str):
+        return v[:19].replace('T', ' ')
+    return v.strftime('%Y-%m-%d %H:%M:%S')
+
+
+@app.route('/api/scrape', methods=['POST'])
+@require_login
+def api_scrape_trigger():
+    if not DATABASE_URL and not DB_PATH.exists():
+        return jsonify({'error': 'No database available to scrape into'}), 400
+    running = fetch_one("SELECT id FROM scrape_runs WHERE status = 'running' LIMIT 1")
+    if running:
+        return jsonify({'error': 'A scrape is already running', 'run_id': running['id']}), 409
+    body = request.get_json(silent=True) or {}
+    run_id = launch_scrape(trigger='manual', http_only=bool(body.get('http_only')))
+    return jsonify({'run_id': run_id})
+
+
+@app.route('/api/scrape/runs')
+@require_login
+def api_scrape_runs():
+    rows = fetch_dict("""
+        SELECT id, started_at, finished_at, status, trigger, http_only, products_scraped, error
+        FROM scrape_runs ORDER BY started_at DESC LIMIT 30
+    """)
+    for r in rows:
+        r['started_at'] = _fmt_ts(r['started_at'])
+        r['finished_at'] = _fmt_ts(r['finished_at'])
+    return jsonify({'runs': rows, 'auto_scrape': AUTO_SCRAPE and bool(DATABASE_URL),
+                     'interval_hours': SCRAPE_INTERVAL_HOURS})
+
+
 # ── Main ──────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='LiftTracker - Equipment Price Dashboard')
+    parser = argparse.ArgumentParser(description='Plate Magnet - Equipment Price Dashboard')
     parser.add_argument('--host', default='0.0.0.0' if DATABASE_URL else '127.0.0.1',
                         help=f'Host (default: {"0.0.0.0" if DATABASE_URL else "127.0.0.1"})')
     parser.add_argument('--port', type=int, default=int(os.environ.get('PORT', 8080)),
@@ -2662,7 +3157,7 @@ def main():
         sys.exit(1)
 
     db_source = 'Neon PostgreSQL' if DATABASE_URL else f'SQLite ({DB_PATH})'
-    print(f"🏋️  LiftTracker Dashboard")
+    print(f"🏋️  Plate Magnet Dashboard")
     print(f"   Database: {db_source}")
     print(f"   URL:      http://{args.host}:{args.port}")
     print(f"   Auth:     enabled (credentials in {AUTH_FILE})")
