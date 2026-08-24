@@ -12,6 +12,14 @@ PATH = "/home/runner/workspace/.local/bin:$PATH"
 localPort = 8080
 externalPort = 80
 
+[[ports]]
+localPort = 8181
+externalPort = 3000
+
+[[ports]]
+localPort = 8182
+externalPort = 3001
+
 [deployment]
 deploymentTarget = "autoscale"
 build = ["bash", "-c", "pip install -q -r requirements.txt && python -m playwright install chromium --with-deps 2>/dev/null || true"]

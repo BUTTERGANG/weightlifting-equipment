@@ -340,7 +340,7 @@ def get_matches_for_product(pid, limit=5):
 # ── CLI ───────────────────────────────────────────────────────────────────
 
 def main():
-    parser = argparse.ArgumentParser(description='Product matching for LiftTracker')
+    parser = argparse.ArgumentParser(description='Product matching for Plate Magnet')
     parser.add_argument('--threshold', type=int, default=65, help='Similarity threshold % (default: 65)')
     parser.add_argument('--test', action='store_true', help='Run normalization tests')
     args = parser.parse_args()

@@ -1,4 +1,4 @@
-# Weightlifting Equipment Price Tracker (LiftTracker)
+# Weightlifting Equipment Price Tracker (Plate Magnet)
 
 A price tracking dashboard for weightlifting gear across 27+ retailers. Scrapes pricing data, tracks historical trends, and highlights deal opportunities.
 
@@ -7,7 +7,7 @@ A price tracking dashboard for weightlifting gear across 27+ retailers. Scrapes 
 - **Backend:** Python + Flask
 - **Database:** PostgreSQL (Neon) in production, SQLite locally
 - **Scraping:** requests + BeautifulSoup for HTTP sites, Playwright for rate-limited / JS-rendered stores
-- **Frontend:** Server-rendered HTML + Chart.js
+- **Frontend:** Server-rendered HTML + Chart.js, dark-mode-first "cyber-athletic" design system
 - **Auth:** Session login with salted password hashes (email-based accounts, self-service password reset via AgentMail)
 
 ## Repo structure
