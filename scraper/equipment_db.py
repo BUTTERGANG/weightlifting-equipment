@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS products (
     category    TEXT,
     currency    TEXT DEFAULT 'USD',
     url         TEXT,
+    image_url   TEXT,
     first_seen  TEXT NOT NULL DEFAULT (datetime('now')),
     last_seen   TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE(site, name)
@@ -115,15 +116,31 @@ def ingest_scrape(json_path):
         if not name or name == 'Unknown':
             continue
 
-        # Upsert into products
-        cur = conn.execute("""
-            INSERT INTO products (site, name, category, currency, url)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(site, name) DO UPDATE SET
-                category = COALESCE(NULLIF(?, ''), category),
-                url      = COALESCE(NULLIF(?, ''), url),
-                last_seen = datetime('now')
-        """, (site, name, category, currency, url, category, url))
+        # Upsert into products — preserve existing image_url if new scrape lacks one
+        new_image_url = p.get('image_url')
+        if not new_image_url:
+            # Keep whatever was already in the DB
+            cur = conn.execute("""
+                INSERT INTO products (site, name, category, currency, url, image_url)
+                VALUES (?, ?, ?, ?, ?, NULL)
+                ON CONFLICT(site, name) DO UPDATE SET
+                    category = COALESCE(NULLIF(?, ''), category),
+                    url      = COALESCE(NULLIF(?, ''), url),
+                    image_url = image_url,
+                    last_seen = datetime('now')
+            """, (site, name, category, currency, url,
+                  category, url))
+        else:
+            cur = conn.execute("""
+                INSERT INTO products (site, name, category, currency, url, image_url)
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(site, name) DO UPDATE SET
+                    category = COALESCE(NULLIF(?, ''), category),
+                    url      = COALESCE(NULLIF(?, ''), url),
+                    image_url = COALESCE(NULLIF(?, ''), image_url),
+                    last_seen = datetime('now')
+            """, (site, name, category, currency, url, new_image_url,
+                  category, url, new_image_url))
 
         if cur.rowcount == 0:
             updated += 1
@@ -313,7 +330,54 @@ def drops(threshold_pct=20):
     conn.close()
 
 
-def cheapest(category='Barbells', limit=15):
+def need_images(limit=100):
+    """Show products missing images that we can fetch."""
+    conn = get_db()
+    cur = conn.execute("""
+        SELECT p.id, p.site, p.name, p.url, p.category
+        FROM products p
+        WHERE (p.image_url IS NULL OR p.image_url = '')
+          AND p.url IS NOT NULL AND p.url != ''
+        ORDER BY p.last_seen DESC
+        LIMIT ?
+    """, (limit,))
+    rows = cur.fetchall()
+    if not rows:
+        print('No products missing images!')
+        return rows
+    print(f'\n{"ID":>6s} {"SITE":20s} {"PRODUCT":50s} {"CATEGORY":20s}')
+    print('─' * 96)
+    for r in rows:
+        print(f'{r["id"]:>6d} {r["site"]:20s} {r["name"][:49]:50s} {r["category"] or "":20s}')
+    print(f'\n{len(rows)} products missing images')
+    conn.close()
+    return rows
+
+
+def update_images_from_scrape(json_path):
+    """Update image_url for products in DB from scrape JSON (no overwrite)."""
+    with open(json_path) as f:
+        products = json.load(f)
+    conn = get_db()
+    updated = 0
+    for p in products:
+        img = p.get('image_url')
+        if not img:
+            continue
+        site = p.get('site', '')
+        name = p.get('name', '')
+        if not site or not name:
+            continue
+        conn.execute(
+            "UPDATE products SET image_url = ? WHERE site = ? AND name = ? AND (image_url IS NULL OR image_url = '')",
+            (img, site, name)
+        )
+        if conn.total_changes > 0:
+            updated += 1
+    conn.commit()
+    conn.close()
+    print(f'Updated {updated} products with images from scrape')
+    return updated
     conn = get_db()
     cur = conn.execute("""
         SELECT p.site, p.name, p.category, ph.price, ph.price_text, ph.currency, ph.scraped_at
@@ -512,6 +576,12 @@ def main():
     elif cmd == 'cheapest':
         cat = ' '.join(args.args) if args.args else 'Barbells'
         cheapest(cat)
+    elif cmd == 'need-images':
+        limit = int(args.args[0]) if args.args else 100
+        need_images(limit)
+    elif cmd == 'update-images':
+        for path in args.args:
+            update_images_from_scrape(path)
     elif cmd == 'query':
         sql = ' '.join(args.args)
         query_raw(sql)

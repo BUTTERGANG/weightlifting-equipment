@@ -16,8 +16,8 @@ A price tracking dashboard for weightlifting gear across 27+ retailers. Scrapes 
 weightlifting-equipment/
 ├── dashboard.py          # Flask web app
 ├── scraper/
-│   ├── equipment_scraper.py   # HTTP scraper (18 stores)
-│   ├── browser_scraper.py     # Playwright scraper (9 stores)
+│   ├── equipment_scraper.py   # HTTP scraper (3 stores)
+│   ├── browser_scraper.py     # Playwright scraper (25 stores, Cloudflare-blocked HTTP)
 │   ├── equipment_db.py        # SQLite DB layer (ingest, query, export)
 │   └── run_scrape.py          # Orchestrator: scrape → save → ingest → push to Neon
 ├── migrate_to_neon.py    # One-time SQLite → PostgreSQL migration
@@ -33,7 +33,7 @@ weightlifting-equipment/
 
 ```bash
 pip install -r requirements.txt
-python scraper/run_scrape.py --http-only          # Scrape 18 HTTP stores
+python scraper/run_scrape.py --http-only          # Scrape 3 HTTP stores
 python dashboard.py --setup-auth                    # Create the first user (email + password)
 python dashboard.py                                 # Start UI at http://127.0.0.1:8080
 ```

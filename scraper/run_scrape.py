@@ -16,6 +16,8 @@ from datetime import datetime, timezone
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from equipment_scraper import scrape_all, to_json, to_csv
+import browser_scraper
+from browser_scraper import SITES
 
 OUTPUT_DIR = Path(__file__).resolve().parent.parent / 'data'
 OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
@@ -88,6 +90,73 @@ def main():
 
     print('Done', flush=True)
 
+    # ── Image fill pass: only for products still missing images ──
+    fill_missing_images_pass()
+
+
+def fill_missing_images_pass():
+    """Fetch images for DB products with NULL image_url (Playwright stores only)."""
+    import sqlite3
+    import collections
+
+    # Local SQLite is the canonical product registry on VPS; on Replit skip (Neon handled separately)
+    db_path = Path.home() / 'equipment_data' / 'equipment.db'
+    if not db_path.exists():
+        print('No local equipment.db — skipping image fill', flush=True)
+        return
+
+    try:
+        conn = sqlite3.connect(str(db_path))
+        conn.row_factory = sqlite3.Row
+        missing = conn.execute("""
+            SELECT p.id, p.site, p.name, p.url
+            FROM products p
+            WHERE (p.image_url IS NULL OR p.image_url = '')
+              AND p.url IS NOT NULL AND p.url != ''
+            ORDER BY p.last_seen DESC
+            LIMIT 500
+        """).fetchall()
+        conn.close()
+    except Exception as e:
+        print(f'Image fill query error: {e}', flush=True)
+        return
+
+    if not missing:
+        print('All products already have images!', flush=True)
+        return
+
+    print(f'{len(missing)} products need images', flush=True)
+    by_site = collections.defaultdict(list)
+    for r in missing:
+        by_site[r['site']].append((r['name'], r['url']))
+
+    site_name_to_key = {v['name']: k for k, v in SITES.items()}
+    total_fetched = 0
+
+    for site_name, prods in by_site.items():
+        browser_key = site_name_to_key.get(site_name)
+        if not browser_key:
+            continue  # HTTP stores already have inline images
+        print(f'  {site_name}: fetching {len(prods)} product images...', flush=True)
+        try:
+            results = browser_scraper.fill_missing_images(browser_scraper.SITES[browser_key], prods)
+        except Exception as e:
+            print(f'    fill error: {e}', flush=True)
+            continue
+        if results:
+            conn = sqlite3.connect(str(db_path))
+            for url, img_url in results.items():
+                conn.execute(
+                    "UPDATE products SET image_url = ? WHERE url = ? AND (image_url IS NULL OR image_url = '')",
+                    (img_url, url)
+                )
+            conn.commit()
+            conn.close()
+            total_fetched += len(results)
+            print(f'    got {len(results)} images', flush=True)
+
+    print(f'Total images fetched: {total_fetched}', flush=True)
+
 
 def push_to_neon(products, db_url):
     """Push scrape results to Neon PostgreSQL."""
@@ -107,9 +176,10 @@ def push_to_neon(products, db_url):
             currency    TEXT DEFAULT 'USD',
             url         TEXT,
             first_seen  TIMESTAMP NOT NULL DEFAULT NOW(),
-            last_seen   TIMESTAMP NOT NULL DEFAULT NOW(),
+            last_seen  TIMESTAMP NOT NULL DEFAULT NOW(),
             UNIQUE(site, name)
         );
+        ALTER TABLE products ADD COLUMN IF NOT EXISTS image_url TEXT;
         CREATE TABLE IF NOT EXISTS price_history (
             id          SERIAL PRIMARY KEY,
             product_id  INTEGER NOT NULL REFERENCES products(id),
@@ -141,15 +211,28 @@ def push_to_neon(products, db_url):
         if not name or not price:
             continue
 
-        # Upsert product
-        cur.execute("""
-            INSERT INTO products (site, name, category, currency, url)
-            VALUES (%s, %s, %s, %s, %s)
-            ON CONFLICT (site, name) DO UPDATE SET
-                category = COALESCE(NULLIF(%s, ''), products.category),
-                url = COALESCE(NULLIF(%s, ''), products.url),
-                last_seen = NOW()
-        """, (site, name, category, currency, url, category, url))
+        # Upsert product — preserve existing image_url if scrape lacks one
+        new_image_url = p.get('image_url')
+        if not new_image_url:
+            cur.execute("""
+                INSERT INTO products (site, name, category, currency, url)
+                VALUES (%s, %s, %s, %s, %s)
+                ON CONFLICT (site, name) DO UPDATE SET
+                    category = COALESCE(NULLIF(%s, ''), products.category),
+                    url = COALESCE(NULLIF(%s, ''), products.url),
+                    last_seen = NOW()
+            """, (site, name, category, currency, url, category, url))
+        else:
+            cur.execute("""
+                INSERT INTO products (site, name, category, currency, url, image_url)
+                VALUES (%s, %s, %s, %s, %s, %s)
+                ON CONFLICT (site, name) DO UPDATE SET
+                    category = COALESCE(NULLIF(%s, ''), products.category),
+                    url = COALESCE(NULLIF(%s, ''), products.url),
+                    image_url = COALESCE(NULLIF(%s, ''), products.image_url),
+                    last_seen = NOW()
+            """, (site, name, category, currency, url, new_image_url,
+                  category, url, new_image_url))
 
         if cur.rowcount == 0 or cur.rowcount == 1:
             inserted += 1

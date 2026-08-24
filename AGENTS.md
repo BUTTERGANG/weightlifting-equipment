@@ -12,15 +12,15 @@ comparison. Runs on Replit with Neon PostgreSQL.
 
 ## What it monitors
 
-**HTTP (18 stores, no browser needed):**
-EliteFTS · Pioneer Fitness · Fringe Sport · Cerberus Strength ·
-Onyx Straps · LiftingLarge · 2POOD · American Barbell · REP Fitness ·
-Bells of Steel · Weightlifting House · Titan Fitness · Get Rx'd ·
-Hookgrip · Force USA · NoBull · Slingshot · Mark Bell
+**HTTP (3 stores, no browser needed):**
+LiftingLarge · Hookgrip · Get Rx'd
 
-**Playwright (9 stores, rate-limited / JS-rendered):**
-Rogue Fitness · TYR Sport · LUXIAOJUN · SBD Apparel · Virus Intl ·
-Born Primitive · Gymreapers · Again Faster · Inzer Advance Designs
+**Playwright (25 stores — every Shopify domain 429s plain HTTP via Cloudflare):**
+Rogue Fitness · TYR Sport · LUXIAOJUN · SBD Apparel · Virus Intl · Born Primitive · Gymreapers · Again Faster · Inzer Advance Designs · EliteFTS · Pioneer Fitness · Fringe Sport · Cerberus Strength · Onyx Straps · 2POOD · American Barbell · REP Fitness · Bells of Steel · Weightlifting House · Titan Fitness · Force USA · NoBull · Slingshot · Mark Bell · Rival Steel
+
+**Domain changes (Aug 2026):** Pioneer Fitness → pioneerfit.com · Cerberus → cerberus-strength.us · Weightlifting House → store.weightliftinghouse.com
+
+**Images:** every product carries `image_url` — HTTP stores extract inline; Playwright stores use a deferred fill pass that batch-fetches `/products/{handle}.json` only for products missing images. Set-once semantics: existing images are never overwritten.
 
 ## Project structure
 
