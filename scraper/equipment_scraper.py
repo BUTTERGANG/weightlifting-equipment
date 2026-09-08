@@ -429,6 +429,20 @@ SITES = {
         'currency': 'USD',
         'parser': 'shopify_preload',
     },
+    'element26': {
+        'name': 'Element 26',
+        'urls': {
+            'Powerlifting Belts': 'https://element26.co/collections/weightlifting-belts',
+            'Special Edition Belts': 'https://element26.co/collections/special-edition-belts',
+            'Knee Sleeves': 'https://element26.co/collections/sleeves',
+            'Lifting Straps': 'https://element26.co/collections/weightlifting-straps',
+            'Grips': 'https://element26.co/collections/grips',
+            'Gym Equipment': 'https://element26.co/collections/gym-equipment',
+        },
+        'domain': 'element26.co',
+        'currency': 'USD',
+        'parser': 'shopify_preload',
+    },
 }
 
 

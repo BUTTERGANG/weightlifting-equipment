@@ -1,6 +1,6 @@
 # Weightlifting Equipment Price Tracker (Plate Magnet)
 
-A price tracking dashboard for weightlifting gear across 27+ retailers. Scrapes pricing data, tracks historical trends, and highlights deal opportunities.
+A price tracking dashboard for weightlifting gear across 28+ retailers. Scrapes pricing data, tracks historical trends, and highlights deal opportunities.
 
 ## Stack
 

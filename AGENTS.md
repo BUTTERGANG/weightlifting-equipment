@@ -1,7 +1,7 @@
 # Weightlifting Equipment Price Tracker
 
 **Scraper + Dashboard** — tracks barbell, plate, rack, belt, apparel, shoe &
-accessory prices across 27+ retailers. Highlights deals via historical price
+accessory prices across 28+ retailers. Highlights deals via historical price
 comparison. Runs on Replit with Neon PostgreSQL.
 
 ## Stack
@@ -14,13 +14,13 @@ comparison. Runs on Replit with Neon PostgreSQL.
 
 ## What it monitors
 
-**HTTP (27 stores, no browser needed):**
+**HTTP (28 stores, no browser needed):**
 EliteFTS · Pioneer Fitness · Fringe Sport · Cerberus Strength ·
 Onyx Straps · LiftingLarge · 2POOD · American Barbell · REP Fitness ·
 Bells of Steel · Weightlifting House · Titan Fitness · Get Rx'd ·
 Hookgrip · Force USA · NoBull · Slingshot · Mark Bell · TYR Sport ·
 LUXIAOJUN · SBD Apparel · Virus Intl · Born Primitive · Gymreapers ·
-Again Faster · Inzer Advance Designs
+Again Faster · Inzer Advance Designs · Element 26
 
 **Playwright (1 store — Rogue Fitness only):**
 Rogue is a Vue SPA with no public product JSON, so it still needs a real
