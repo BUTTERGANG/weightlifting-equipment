@@ -7,11 +7,12 @@ Last updated: 2026-08-23
 | Task | Status | Owner | Notes |
 |---|---|---|---|
 | Add image_url column to Neon | backlog | — | **Blocking** — do first |
-| Sync migrated scrapers into repo | backlog | — | Repo is stale vs ~/.hermes/scripts |
-| First full image-fill pass | backlog | — | After Neon + sync |
+| Sync migrated scrapers into repo | backlog | — | ✅ DONE 2026-09-08 (b2d39e0) — merged w/ Replit side, products.json approach adopted |
+| First full image-fill pass | backlog | — | Mostly obsolete — images now inline via products.json |
 | Dashboard product images | backlog | — | Needs image data |
-| README refresh | backlog | — | Quick win, anytime |
+| README refresh | backlog | — | ✅ DONE 2026-09-08 — AGENTS.md/README updated in sync commit |
 | Digest deals with images | backlog | — | Blocked on deal history (5+ scrapes) |
+| **Store threshold discounts** | backlog | — | NEW — TYR 20%/$99 verified; banners + checkout probes |
 
 ## Done this sprint (pre-board)
 
