@@ -1128,7 +1128,8 @@ HTML = r"""<!DOCTYPE html>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
 <style>
 :root {
-  color-scheme: dark;
+  color-scheme: var(--scheme);
+  --scheme: dark;
   --bg-base: #090b10;
   --bg-surface: #10141d;
   --bg-card: #151a26;
@@ -1153,25 +1154,93 @@ HTML = r"""<!DOCTYPE html>
   --radius-md: 10px;
   --radius-lg: 16px;
   --radius-xl: 22px;
+
+  /* theme-aware surfaces (overridden below for light mode) */
+  --surface-glass: rgba(16, 20, 29, 0.85);
+  --brand-icon-bg: linear-gradient(135deg, #1e293b, #0f172a);
+  --table-header: #131722;
+  --row-hover: rgba(30, 41, 59, 0.35);
+  --pill-bg: rgba(255, 255, 255, 0.04);
+  --pill-border: rgba(255, 255, 255, 0.05);
+  --icon-btn-bg: rgba(255, 255, 255, 0.04);
+  --bar-bg: rgba(21, 26, 38, 0.4);
+  --overlay: rgba(4, 6, 10, 0.75);
+  --close-btn-bg: rgba(255, 255, 255, 0.05);
+  --scroll-track: #090b10;
+  --scroll-thumb: #22293b;
+  --chart-tooltip-bg: #10141d;
+  --chart-tooltip-title: #94a3b8;
+  --chart-tooltip-body: #fff;
+  --chart-tooltip-border: #22293b;
+  --chart-grid: rgba(255, 255, 255, 0.04);
+  --chart-grid-y: rgba(255, 255, 255, 0.05);
+  --chart-tick-x: #64748b;
+  --chart-tick-y: #94a3b8;
+}
+
+/* Light theme token set (default is dark — data-theme set by toggle) */
+html[data-theme="light"] {
+  color-scheme: light;
+  --scheme: light;
+  --bg-base: #eef2f7;
+  --bg-surface: #ffffff;
+  --bg-card: #f7fafc;
+  --bg-card-hover: #eef2f7;
+  --bg-input: #ffffff;
+  --border: #dbe2ec;
+  --border-light: #c7d0df;
+
+  --text-main: #0f172a;
+  --text-muted: #475569;
+  --text-dim: #64748b;
+
+  --cyan: #0284c7;
+  --cyan-glow: rgba(2, 132, 199, 0.12);
+  --emerald: #059669;
+  --emerald-glow: rgba(5, 150, 105, 0.12);
+  --amber: #b45309;
+  --rose: #e11d48;
+  --purple: #7c3aed;
+
+  --surface-glass: rgba(255, 255, 255, 0.85);
+  --brand-icon-bg: linear-gradient(135deg, #e2e8f0, #cbd5e1);
+  --table-header: #e8edf4;
+  --row-hover: rgba(15, 23, 42, 0.04);
+  --pill-bg: rgba(15, 23, 42, 0.04);
+  --pill-border: rgba(15, 23, 42, 0.08);
+  --icon-btn-bg: rgba(15, 23, 42, 0.05);
+  --bar-bg: rgba(238, 242, 247, 0.7);
+  --overlay: rgba(15, 23, 42, 0.45);
+  --close-btn-bg: rgba(15, 23, 42, 0.05);
+  --scroll-track: #eef2f7;
+  --scroll-thumb: #cbd5e1;
+  --chart-tooltip-bg: #ffffff;
+  --chart-tooltip-title: #475569;
+  --chart-tooltip-body: #0f172a;
+  --chart-tooltip-border: #dbe2ec;
+  --chart-grid: rgba(15, 23, 42, 0.05);
+  --chart-grid-y: rgba(15, 23, 42, 0.06);
+  --chart-tick-x: #64748b;
+  --chart-tick-y: #475569;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
 html {
-  background-color: #090b10;
-  color-scheme: dark;
+  background-color: var(--bg-base);
+  color-scheme: var(--scheme);
 }
 
-/* Custom Scrollbars in Dark Mode */
+/* Custom Scrollbars */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #090b10;
+  background: var(--scroll-track);
 }
 ::-webkit-scrollbar-thumb {
-  background: #22293b;
+  background: var(--scroll-thumb);
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
@@ -1179,8 +1248,8 @@ html {
 }
 
 select option {
-  background-color: #111622;
-  color: #f8fafc;
+  background-color: var(--bg-input);
+  color: var(--text-main);
 }
 
 body {
@@ -1196,7 +1265,7 @@ body {
 
 /* ── Top Navbar ── */
 header {
-  background: rgba(16, 20, 29, 0.85);
+  background: var(--surface-glass);
   backdrop-filter: blur(14px);
   -webkit-backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--border);
@@ -1225,7 +1294,7 @@ header {
 .brand-icon {
   width: 38px;
   height: 38px;
-  background: linear-gradient(135deg, #1e293b, #0f172a);
+  background: var(--brand-icon-bg);
   border: 1px solid var(--border-light);
   border-radius: var(--radius-md);
   display: flex;
@@ -1239,7 +1308,7 @@ header {
   font-size: 20px;
   font-weight: 800;
   letter-spacing: -0.5px;
-  color: #fff;
+  color: var(--text-main);
 }
 
 .brand-title span {
@@ -1414,6 +1483,27 @@ header {
   color: #fff;
 }
 
+.theme-toggle {
+  width: 38px;
+  height: 38px;
+  border-radius: 50%;
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  color: var(--text-main);
+  font-size: 16px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+}
+.theme-toggle:hover {
+  border-color: var(--cyan);
+  transform: translateY(-1px);
+}
+
 .btn-ghost {
   background: transparent;
   color: var(--text-dim);
@@ -1489,7 +1579,7 @@ header {
   font-size: 28px;
   font-weight: 700;
   letter-spacing: -0.5px;
-  color: #fff;
+  color: var(--text-main);
 }
 
 .metric-sub {
@@ -1565,7 +1655,7 @@ header {
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  color: #fff;
+  color: var(--text-main);
   font-size: 13.5px;
   outline: none;
   transition: all 0.15s ease;
@@ -1627,7 +1717,7 @@ select:focus {
 
 .toggle-chip:hover {
   border-color: var(--border-light);
-  color: #fff;
+  color: var(--text-main);
 }
 
 .toggle-chip.active {
@@ -1677,7 +1767,7 @@ select:focus {
   justify-content: space-between;
   align-items: center;
   padding: 14px 20px;
-  background: rgba(21, 26, 38, 0.4);
+  background: var(--bar-bg);
   border-bottom: 1px solid var(--border);
   font-size: 13px;
   color: var(--text-muted);
@@ -1696,7 +1786,7 @@ table {
 }
 
 thead th {
-  background: #131722;
+  background: var(--table-header);
   color: var(--text-dim);
   font-size: 11.5px;
   font-weight: 700;
@@ -1727,7 +1817,7 @@ tbody tr {
 }
 
 tbody tr:hover {
-  background: rgba(30, 41, 59, 0.35);
+  background: var(--row-hover);
 }
 
 tbody td {
@@ -1793,7 +1883,7 @@ tbody td {
 }
 
 .prod-link {
-  color: #fff;
+  color: var(--text-main);
   font-weight: 600;
   text-decoration: none;
   display: -webkit-box;
@@ -1823,10 +1913,10 @@ tbody td {
 .cat-pill {
   font-size: 12px;
   color: var(--text-muted);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--pill-bg);
   padding: 3px 8px;
   border-radius: var(--radius-sm);
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--pill-border);
   white-space: nowrap;
 }
 
@@ -1860,7 +1950,7 @@ tbody td {
   width: 32px;
   height: 32px;
   border-radius: var(--radius-md);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--icon-btn-bg);
   border: 1px solid var(--border);
   color: var(--text-muted);
   display: flex;
@@ -1884,7 +1974,7 @@ tbody td {
   justify-content: space-between;
   align-items: center;
   padding: 14px 20px;
-  background: rgba(21, 26, 38, 0.4);
+  background: var(--bar-bg);
   border-top: 1px solid var(--border);
   font-size: 13px;
   color: var(--text-muted);
@@ -1923,7 +2013,7 @@ tbody td {
 .modal-overlay {
   position: fixed;
   inset: 0;
-  background: rgba(4, 6, 10, 0.75);
+  background: var(--overlay);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px);
   z-index: 100;
@@ -1976,7 +2066,7 @@ tbody td {
 .modal-title-area h2 {
   font-size: 19px;
   font-weight: 700;
-  color: #fff;
+  color: var(--text-main);
   line-height: 1.35;
 }
 
@@ -1989,7 +2079,7 @@ tbody td {
 }
 
 .modal-close-btn {
-  background: rgba(255, 255, 255, 0.05);
+  background: var(--close-btn-bg);
   border: 1px solid var(--border);
   color: var(--text-muted);
   width: 34px;
@@ -2066,6 +2156,7 @@ tbody td {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   padding: 16px;
+  overflow-x: auto;
 }
 
 .section-head {
@@ -2104,10 +2195,37 @@ tbody td {
 /* ── Responsive ── */
 @media (max-width: 900px) {
   .nav-container { flex-direction: column; align-items: flex-start; }
-  .nav-actions { width: 100%; justify-content: space-between; }
+  .nav-actions { width: 100%; justify-content: space-between; flex-wrap: wrap; }
   .control-bar { flex-direction: column; align-items: stretch; }
   .filter-group { width: 100%; }
   .filter-group select { flex: 1; }
+}
+
+/* Mobile (390px-class phones) — stacked layout, tap-friendly, no page overflow */
+@media (max-width: 640px) {
+  .nav-container { padding: 12px 16px; gap: 12px; }
+  .nav-actions { gap: 8px; }
+  .brand-badge { display: none; }
+  .brand-title { font-size: 18px; }
+  .app-layout { padding: 16px; gap: 16px; }
+  .control-bar { padding: 14px; }
+  .search-group { min-width: 100%; }
+  .filter-group select { flex: 1 1 100%; }
+  .filter-group .toggle-chip, .filter-group .action-btn { flex: 1; justify-content: center; }
+  .metric-card { padding: 16px; }
+  .metric-val { font-size: 24px; }
+  .table-stats-bar { flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px 14px; }
+  .table-pagination { flex-direction: column; align-items: flex-start; gap: 10px; padding: 12px 14px; }
+  .page-controls { width: 100%; justify-content: space-between; }
+  .action-icon-btn { width: 38px; height: 38px; }
+  .modal-overlay { padding: 10px; }
+  .modal-card { max-height: 97vh; }
+  .modal-header { padding: 16px 18px; }
+  .modal-body { padding: 16px 18px; }
+  .deal-banner { flex-direction: column; align-items: flex-start; }
+  .mini-table { min-width: 480px; }
+  .scrape-pulse { padding: 6px 12px; }
+  .user-pill { padding: 6px 12px; }
 }
 </style>
 </head>
@@ -2123,8 +2241,9 @@ tbody td {
     <div class="nav-actions">
       <div class="scrape-pulse" onclick="openScrapeModal()" title="View scrape history / run a scrape">
         <div class="pulse-dot" id="pulseDot"></div>
-        <span>Sync: <strong id="lastScrape" style="color:#fff">—</strong></span>
+        <span>Sync: <strong id="lastScrape" style="color:var(--text-main)">—</strong></span>
       </div>
+      <button class="theme-toggle" id="themeToggle" onclick="toggleTheme()" title="Toggle light / dark theme" aria-label="Toggle light or dark theme">🌙</button>
       <div class="user-pill">
         <div class="user-avatar" id="userInitial">A</div>
         <span id="userName">admin</span>
@@ -2205,7 +2324,7 @@ tbody td {
   <!-- Products Data Table -->
   <section class="table-panel">
     <div class="table-stats-bar">
-      <div>Showing <strong id="resultCount" style="color:#fff">0</strong> items</div>
+      <div>Showing <strong id="resultCount" style="color:var(--text-main)">0</strong> items</div>
       <div id="filterSummary">Viewing all equipment</div>
     </div>
 
@@ -2314,7 +2433,7 @@ tbody td {
         <div class="deal-banner-left">
           <div class="deal-pct-huge" id="detailDealPct">-25%</div>
           <div>
-            <div style="font-weight:700;color:#fff;font-size:15px">Verified Price Drop</div>
+            <div style="font-weight:700;color:var(--text-main);font-size:15px">Verified Price Drop</div>
             <div style="color:var(--text-muted);font-size:13px" id="detailDealStats">Current $150 vs Average $200</div>
           </div>
         </div>
@@ -2371,8 +2490,12 @@ tbody td {
 
 <script>
 let allProducts = [], stores = [], categories = [], currentPage = 1, pageSize = 50;
-let sortField = 'deal', sortDir = 'desc', chartInstance = null;
+let sortField = 'deal', sortDir = 'desc', chartInstance = null, lastDetailId = null;
 let onlyDeals = false;
+
+function cssVar(name) {
+  return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+}
 
 const STORE_COLORS = {
   "Rogue Fitness": "#ef4444",
@@ -2619,6 +2742,7 @@ function esc(s) {
 }
 
 async function showDetail(id) {
+  lastDetailId = id;
   try {
     const r = await fetch(`/api/product/${id}`);
     if (!r.ok) return;
@@ -2675,15 +2799,15 @@ async function showDetail(id) {
         datasets: [{
           label: 'Price (USD)',
           data: chartPrices,
-          borderColor: '#38bdf8',
-          backgroundColor: 'rgba(56, 189, 248, 0.08)',
+          borderColor: cssVar('--cyan'),
+          backgroundColor: cssVar('--cyan-glow'),
           borderWidth: 2.5,
           fill: true,
           tension: 0.3,
           pointRadius: 4,
-          pointBackgroundColor: '#38bdf8',
+          pointBackgroundColor: cssVar('--cyan'),
           pointHoverRadius: 7,
-          pointHoverBackgroundColor: '#fff',
+          pointHoverBackgroundColor: cssVar('--chart-tooltip-body'),
         }]
       },
       options: {
@@ -2692,10 +2816,10 @@ async function showDetail(id) {
         plugins: {
           legend: { display: false },
           tooltip: {
-            backgroundColor: '#10141d',
-            titleColor: '#94a3b8',
-            bodyColor: '#fff',
-            borderColor: '#22293b',
+            backgroundColor: cssVar('--chart-tooltip-bg'),
+            titleColor: cssVar('--chart-tooltip-title'),
+            bodyColor: cssVar('--chart-tooltip-body'),
+            borderColor: cssVar('--chart-tooltip-border'),
             borderWidth: 1,
             padding: 10,
             callbacks: {
@@ -2705,13 +2829,13 @@ async function showDetail(id) {
         },
         scales: {
           x: {
-            grid: { color: 'rgba(255, 255, 255, 0.04)' },
-            ticks: { color: '#64748b', font: { family: "'Plus Jakarta Sans', sans-serif" } }
+            grid: { color: cssVar('--chart-grid') },
+            ticks: { color: cssVar('--chart-tick-x'), font: { family: "'Plus Jakarta Sans', sans-serif" } }
           },
           y: {
-            grid: { color: 'rgba(255, 255, 255, 0.05)' },
+            grid: { color: cssVar('--chart-grid-y') },
             ticks: {
-              color: '#94a3b8',
+              color: cssVar('--chart-tick-y'),
               font: { family: "'JetBrains Mono', monospace" },
               callback: v => '$' + v.toFixed(0)
             }
@@ -2727,7 +2851,7 @@ async function showDetail(id) {
       ms.style.display = 'block';
       mb.innerHTML = prod.matches.map(m => {
         const mc = storeColor(m.site);
-        const link = m.url ? `<a href="${esc(m.url)}" target="_blank" style="color:#fff;text-decoration:none">${esc(m.name)} ↗</a>` : esc(m.name);
+        const link = m.url ? `<a href="${esc(m.url)}" target="_blank" style="color:var(--text-main);text-decoration:none">${esc(m.name)} ↗</a>` : esc(m.name);
         return `<tr>
           <td><span class="store-badge" style="background:${mc}22;color:${mc};border:1px solid ${mc}55">${esc(m.site)}</span></td>
           <td>${link}</td>
@@ -2891,6 +3015,25 @@ async function triggerScrape() {
   }
 }
 
+// ── Theme (light / dark) Toggle ─────────────────────────────────────────
+function applyTheme(theme, persist) {
+  document.documentElement.setAttribute('data-theme', theme);
+  if (persist) localStorage.setItem('plateMagnetTheme', theme);
+  const btn = document.getElementById('themeToggle');
+  if (btn) btn.textContent = theme === 'light' ? '☀️' : '🌙';
+}
+function initTheme() {
+  const saved = localStorage.getItem('plateMagnetTheme');
+  applyTheme(saved === 'light' ? 'light' : 'dark', false);
+}
+function toggleTheme() {
+  const cur = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+  applyTheme(cur, true);
+  // Re-render an open chart with the new theme's colors.
+  if (lastDetailId != null) showDetail(lastDetailId);
+}
+
+initTheme();
 loadData();
 setInterval(refreshScrapeRuns, 30000);
 </script>
