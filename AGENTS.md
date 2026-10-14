@@ -20,16 +20,14 @@ Onyx Straps · LiftingLarge · 2POOD · American Barbell · REP Fitness ·
 Bells of Steel · Weightlifting House · Titan Fitness · Get Rx'd ·
 Hookgrip · Force USA · NoBull · Slingshot · Mark Bell · TYR Sport ·
 LUXIAOJUN · SBD Apparel · Virus Intl · Born Primitive · Gymreapers ·
-Again Faster · Inzer Advance Designs · Element 26
+Again Faster · Inzer Advance Designs · Element 26 · Rival Steel
 
-**Playwright (1 store — Rogue Fitness only):**
-Rogue is a Vue SPA with no public product JSON, so it still needs a real
-rendered DOM. Every other store previously here (TYR, LUXIAOJUN, SBD, Virus,
-Gymreapers, Inzer, Born Primitive, Again Faster) turned out to expose
-Shopify's public `/products.json` API even though their HTML pages block
-plain `requests` — moved to the HTTP path (`equipment_scraper.py`'s
-`extract_shopify_collection_json()`), which is faster, more reliable, and
-returns product images for free.
+**Playwright (Rogue Fitness full-page + 429 fallback for all Shopify stores):**
+Rogue is a Vue SPA with no public product JSON, so it needs a real rendered DOM.
+All Shopify stores use the `/products.json` API path. When Cloudflare 429s those
+endpoints (it does, since Oct 2026), `equipment_scraper.py` transparently falls
+back to in-page `fetch()` through a shared Playwright browser session
+(`fetch_products_json_browser()`), then tears down via `close_browser_fetch()`.
 
 ## Project structure
 
@@ -142,6 +140,19 @@ Scraper → JSON file → SQLite (local) or Neon (Replit) ← Dashboard reads
 
 The VPS cron runs daily at 6am UTC, scrapes all stores, and pushes to the
 same Neon database the Replit dashboard reads from.
+
+## Cloudflare escalation history
+
+- **Aug 2026:** HTML collection pages 429'd plain requests; `/products.json` still worked.
+- **Oct 2026:** Cloudflare escalated — `/products.json` also 429s via plain requests after
+  a handful of collection calls per store. Per-IP bans last 20+ minutes.
+- **Fix:** browser-backed fallback (`fetch_products_json_browser` in
+  `scraper/equipment_scraper.py`). One shared Playwright context for the whole run;
+  HTTP first, in-page `fetch()` on 429; torn down by `close_browser_fetch()` at the
+  end of `scrape_all()`.
+- **Empirical pacing data:** ~20 rapid requests trigger the ban on a fresh IP.
+  GETs unblock before POSTs. Don't hammer — one probe per store per week for
+  checkout-level verification.
 
 ## Lessons learned (cross-project)
 

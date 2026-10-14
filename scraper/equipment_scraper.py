@@ -490,6 +490,77 @@ def fetch_page(url):
 # Gymreapers, Inzer, Born Primitive, Again Faster) — verified live, so those
 # no longer need Playwright.
 
+
+# ── Browser-backed JSON fetch (429 fallback) ─────────────────────────────
+# Cloudflare rate-limits plain HTTP /products.json calls per-IP. Real Chromium
+# passes. State machine: HTTP first; on 429 for a domain, launch a persistent
+# Playwright context and route that domain's JSON fetches through in-page fetch().
+
+_browser_state = {'context': None, 'playwright': None, 'domains': set()}
+
+
+def _get_browser_page(domain):
+    """Lazily start a shared Playwright context; navigate to domain once."""
+    if _browser_state['context'] is None:
+        from playwright.sync_api import sync_playwright
+        _browser_state['playwright'] = sync_playwright().start()
+        browser = _browser_state['playwright'].chromium.launch(headless=True)
+        _browser_state['context'] = browser.new_context(
+            user_agent=('Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
+                        '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'),
+            viewport={'width': 1366, 'height': 900},
+        )
+    if domain not in _browser_state['domains']:
+        page = _browser_state['context'].new_page()
+        try:
+            page.goto(f'https://{domain}/', wait_until='domcontentloaded', timeout=20000)
+        except Exception:
+            pass
+        _browser_state['domains'].add(domain)
+        _browser_state['page'] = page
+    return _browser_state.get('page')
+
+
+def fetch_products_json_browser(collection_url, limit=250, page_num=1):
+    """Fetch {collection}/products.json via in-page browser fetch (429 fallback)."""
+    base = collection_url.split('?')[0].rstrip('/')
+    domain = re.sub(r'^https?://', '', base).split('/')[0]
+    page = _get_browser_page(domain)
+    if page is None:
+        return None
+    try:
+        raw = page.evaluate(
+            """async (args) => {
+                const resp = await fetch(args.url, {signal: AbortSignal.timeout(15000)});
+                if (!resp.ok) return 'HTTP_' + resp.status;
+                return await resp.text();
+            }""",
+            {'url': f'{base}/products.json?limit={limit}&page={page_num}'}
+        )
+        if isinstance(raw, str) and raw.startswith('{'):
+            return json.loads(raw)
+        if isinstance(raw, str) and raw.startswith('HTTP_'):
+            print(f'    browser fetch: {raw}', flush=True)
+        return None
+    except Exception as e:
+        print(f'    browser fetch error: {str(e)[:60]}', flush=True)
+        return None
+
+
+def close_browser_fetch():
+    """Tear down the shared browser session (call at end of scrape_all)."""
+    if _browser_state['context'] is not None:
+        try:
+            _browser_state['context'].close()
+            _browser_state['playwright'].stop()
+        except Exception:
+            pass
+        _browser_state['context'] = None
+        _browser_state['playwright'] = None
+        _browser_state['domains'] = set()
+        _browser_state.pop('page', None)
+
+
 def extract_shopify_collection_json(collection_url, currency='USD', min_price=1.0):
     products = []
     seen = set()
@@ -500,12 +571,18 @@ def extract_shopify_collection_json(collection_url, currency='USD', min_price=1.
     while page <= 20:  # safety cap — no collection realistically has 5000+ items
         r = requests.get(f'{base}/products.json', params={'limit': 250, 'page': page},
                           headers=HEADERS, timeout=TIMEOUT)
-        if r.status_code != 200:
+        if r.status_code == 429:
+            # Cloudflare rate-limited plain HTTP — fall back to browser fetch
+            # for the remainder of this collection.
+            data = fetch_products_json_browser(base, limit=250, page_num=page)
+            items = (data or {}).get('products', [])
+        elif r.status_code != 200:
             break
-        try:
-            items = r.json().get('products', [])
-        except ValueError:
-            break
+        else:
+            try:
+                items = r.json().get('products', [])
+            except ValueError:
+                break
         if not items:
             break
 
@@ -901,6 +978,7 @@ def scrape_all(site_filter=None, category_filter=None, use_browser=False):
             if category_filter.lower() in p.get('category', '').lower()
         ]
 
+    close_browser_fetch()
     return results, all_products
 
 
